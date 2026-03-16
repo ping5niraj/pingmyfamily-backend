@@ -27,8 +27,8 @@ app.get('/', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 
-// Phase 1 routes (Day 3-4 onwards):
-// app.use('/api/relationships', require('./routes/relationships'));
+// Phase 1 routes
+app.use('/api/relationships', require('./routes/relationships'));
 // app.use('/api/tree', require('./routes/tree'));
 // app.use('/api/invites', require('./routes/invites'));
 // app.use('/api/inference', require('./routes/inference'));
