@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const supabase = require('../supabase');
 
-// In-memory OTP store — { phone: { otp, expiresAt } }
+// In-memory OTP store
 const otpStore = {};
 
 // ─── Send OTP via MSG91 ────────────────────────────────────
@@ -13,30 +13,25 @@ async function sendOTPviaMSG91(phone, otp) {
   const templateId = process.env.MSG91_TEMPLATE_ID;
   const senderId = process.env.MSG91_SENDER_ID || 'NALAMN';
 
-  // MSG91 OTP API
-  const url = 'https://api.msg91.com/api/v5/otp';
+  console.log('[MSG91] Sending OTP to:', phone);
+  console.log('[MSG91] Template ID:', templateId);
+  console.log('[MSG91] Sender ID:', senderId);
 
-  const params = {
-    template_id: templateId,
-    mobile: `91${phone}`, // India country code
-    authkey: authKey,
-    otp: otp,
-    sender: senderId,
-  };
+  // MSG91 Send OTP API — correct format
+  const url = `https://api.msg91.com/api/v5/otp?template_id=${templateId}&mobile=91${phone}&authkey=${authKey}&otp=${otp}&sender=${senderId}`;
 
-  const response = await axios.get(url, { params });
-  console.log('MSG91 response:', response.data);
+  const response = await axios.post(url);
+  console.log('[MSG91] Response:', response.data);
   return response.data;
 }
 
-// ─── GET /api/auth/send-otp ────────────────────────────────
+// ─── GET handler ──────────────────────────────────────────
 router.get('/send-otp', (req, res) => {
   res.json({ message: 'Use POST /api/auth/send-otp with { phone } in the request body' });
 });
 
 // ─────────────────────────────────────────
 // POST /api/auth/send-otp
-// Body: { phone }
 // ─────────────────────────────────────────
 router.post('/send-otp', async (req, res) => {
   const { phone } = req.body;
@@ -49,46 +44,39 @@ router.post('/send-otp', async (req, res) => {
 
   // Generate 6-digit OTP
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+  const expiresAt = Date.now() + 10 * 60 * 1000;
 
-  // Store OTP
   otpStore[normalised] = { otp, expiresAt };
 
-  const isDev = process.env.NODE_ENV !== 'production' && !process.env.MSG91_AUTH_KEY;
+  // Check if MSG91 is configured
+  const hasMSG91 = process.env.MSG91_AUTH_KEY && process.env.MSG91_TEMPLATE_ID;
 
-  if (isDev) {
-    // DEV mode — no SMS
+  if (!hasMSG91) {
     console.log(`[DEV] OTP for ${normalised}: ${otp}`);
     return res.json({
       success: true,
-      message: 'OTP sent (DEV mode — use 123456)',
+      message: 'OTP sent (DEV mode)',
       dev_otp: otp
     });
   }
 
   try {
-    // Production — send via MSG91
     await sendOTPviaMSG91(normalised, otp);
-    console.log(`[MSG91] OTP sent to ${normalised}`);
-
     return res.json({
       success: true,
       message: 'OTP sent successfully to your phone'
     });
   } catch (err) {
-    console.error('MSG91 error:', err.response?.data || err.message);
-
-    // Fallback — still store OTP, just log error
+    console.error('[MSG91] Error:', err.response?.data || err.message);
     return res.status(500).json({
       error: 'Failed to send OTP. Please try again.',
-      details: err.response?.data?.message || err.message
+      details: err.response?.data || err.message
     });
   }
 });
 
 // ─────────────────────────────────────────
 // POST /api/auth/verify-otp
-// Body: { phone, otp }
 // ─────────────────────────────────────────
 router.post('/verify-otp', async (req, res) => {
   const { phone, otp } = req.body;
@@ -113,10 +101,8 @@ router.post('/verify-otp', async (req, res) => {
     return res.status(400).json({ error: 'Incorrect OTP. Please try again.' });
   }
 
-  // OTP valid — clear it
   delete otpStore[normalised];
 
-  // Check if user exists
   const { data: existingUser, error: fetchError } = await supabase
     .from('pmf_users')
     .select('*')
@@ -124,7 +110,6 @@ router.post('/verify-otp', async (req, res) => {
     .single();
 
   if (fetchError && fetchError.code !== 'PGRST116') {
-    console.error('Supabase fetch error:', fetchError);
     return res.status(500).json({ error: 'Database error' });
   }
 
@@ -148,7 +133,6 @@ router.post('/verify-otp', async (req, res) => {
     });
   }
 
-  // New user
   const tempToken = jwt.sign(
     { phone: normalised, isTemp: true },
     process.env.JWT_SECRET,
