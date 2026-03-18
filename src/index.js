@@ -2,9 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-const authRoutes = require('./routes/auth');
-const userRoutes = require('./routes/users');
-
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -23,15 +20,13 @@ app.get('/', (req, res) => {
   });
 });
 
-// ─── Routes ────────────────────────────────────────────
-app.use('/api/auth', authRoutes);
-app.use('/api/users', userRoutes);
+// ─── Public Routes ─────────────────────────────────────
+app.use('/api/auth', require('./routes/auth'));
 
-// Phase 1 routes
+// ─── Protected Routes ──────────────────────────────────
+app.use('/api/users', require('./routes/users'));
 app.use('/api/relationships', require('./routes/relationships'));
-// app.use('/api/tree', require('./routes/tree'));
-// app.use('/api/invites', require('./routes/invites'));
-// app.use('/api/inference', require('./routes/inference'));
+app.use('/api/photos', require('./routes/photos'));
 
 // ─── 404 Handler ───────────────────────────────────────
 app.use((req, res) => {
@@ -44,9 +39,16 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+// ─── Prevent crashes ───────────────────────────────────
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception — server continues:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection — server continues:', reason);
+});
+
 // ─── Start ─────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`PingMyFamily API running on port ${PORT}`);
   console.log(`[DEV] OTP is hardcoded: ${process.env.DEV_OTP || '123456'}`);
-  console.log(`[DEV] Remember: MASTER_OTP must be removed before production`);
 });

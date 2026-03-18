@@ -5,16 +5,66 @@ const authMiddleware = require('../middleware/auth');
 const { getTamilName, isValidCoreRelation } = require('../utils/tamilRelations');
 const { runInference } = require('../utils/inferenceEngine');
 
-// All routes require authentication
-router.use(authMiddleware);
+// ─── Relationship flip map ─────────────────────────────
+// When person B views a relationship that person A created
+// we flip it to show B's perspective
+const FLIP_MAP = {
+  father:    { type: 'son',      tamil: 'Magan'   }, // if I added you as father, you see me as son
+  mother:    { type: 'son',      tamil: 'Magan'   }, // mother sees me as son
+  son:       { type: 'father',   tamil: 'Appa'    }, // son sees me as father
+  daughter:  { type: 'father',   tamil: 'Appa'    }, // daughter sees me as father
+  brother:   { type: 'brother',  tamil: 'Annan'   }, // brother sees me as brother
+  sister:    { type: 'sister',   tamil: 'Akka'    }, // sister sees me as sister
+  spouse:    { type: 'spouse',   tamil: 'Manam'   }, // spouse sees me as spouse
+  son:       { type: 'father',   tamil: 'Appa'    },
+  grandson:  { type: 'grandfather_paternal', tamil: 'Thatha' },
+  granddaughter: { type: 'grandfather_paternal', tamil: 'Thatha' },
+  uncle_elder:   { type: 'cousin_male', tamil: 'Machan' },
+  uncle_younger: { type: 'cousin_male', tamil: 'Machan' },
+  aunt_paternal: { type: 'cousin_female', tamil: 'Maami' },
+  uncle_maternal:{ type: 'cousin_male', tamil: 'Machan' },
+  aunt_maternal: { type: 'cousin_female', tamil: 'Maami' },
+  grandfather_paternal: { type: 'grandson', tamil: 'Peran' },
+  grandmother_paternal: { type: 'grandson', tamil: 'Peran' },
+  grandfather_maternal: { type: 'grandson', tamil: 'Peran' },
+  grandmother_maternal: { type: 'grandson', tamil: 'Peran' },
+  father_in_law: { type: 'son_in_law', tamil: 'Maappillai' },
+  mother_in_law: { type: 'son_in_law', tamil: 'Maappillai' },
+  brother_in_law:{ type: 'brother_in_law', tamil: 'Maitthunan' },
+  sister_in_law: { type: 'sister_in_law', tamil: 'Naathanar' },
+  co_brother:    { type: 'co_brother', tamil: 'Sakaali' },
+};
+
+// Gender-aware flip — if we know the logged-in user's gender
+function getFlipped(relationType, userGender) {
+  const base = FLIP_MAP[relationType];
+  if (!base) return { type: relationType, tamil: getTamilName(relationType) };
+
+  // Adjust for gender
+  if (relationType === 'father' || relationType === 'mother') {
+    if (userGender === 'female') return { type: 'daughter', tamil: 'Magal' };
+    return { type: 'son', tamil: 'Magan' };
+  }
+  if (relationType === 'son' || relationType === 'daughter') {
+    if (userGender === 'female') return { type: 'mother', tamil: 'Amma' };
+    return { type: 'father', tamil: 'Appa' };
+  }
+  if (relationType === 'brother' || relationType === 'sister') {
+    if (userGender === 'female') return { type: 'sister', tamil: 'Akka' };
+    return { type: 'brother', tamil: 'Annan' };
+  }
+  if (relationType === 'grandson' || relationType === 'granddaughter') {
+    if (userGender === 'female') return { type: 'grandmother_paternal', tamil: 'Paati' };
+    return { type: 'grandfather_paternal', tamil: 'Thatha' };
+  }
+
+  return base;
+}
 
 // ─────────────────────────────────────────
 // POST /api/relationships
-// Add a new relationship (triggers verification request to the other person)
-// Body: { to_user_phone, relation_type }
-// Example: { to_user_phone: "9999999998", relation_type: "father" }
 // ─────────────────────────────────────────
-router.post('/', async (req, res) => {
+router.post('/', authMiddleware, async (req, res) => {
   const { to_user_phone, relation_type } = req.body;
 
   if (!to_user_phone || !relation_type) {
@@ -28,7 +78,6 @@ router.post('/', async (req, res) => {
     });
   }
 
-  // Find the other user by phone
   const { data: toUser, error: userError } = await supabase
     .from('pmf_users')
     .select('id, name, phone')
@@ -41,12 +90,10 @@ router.post('/', async (req, res) => {
     });
   }
 
-  // Can't add yourself
   if (toUser.id === req.user.id) {
     return res.status(400).json({ error: 'You cannot add yourself as a relative' });
   }
 
-  // Check if relationship already exists
   const { data: existing } = await supabase
     .from('pmf_relationships')
     .select('id, verification_status')
@@ -62,7 +109,6 @@ router.post('/', async (req, res) => {
     });
   }
 
-  // Create the relationship (pending verification)
   const { data: newRel, error: insertError } = await supabase
     .from('pmf_relationships')
     .insert({
@@ -96,11 +142,21 @@ router.post('/', async (req, res) => {
 
 // ─────────────────────────────────────────
 // GET /api/relationships/mine
-// Get all my relationships (verified + pending)
+// Returns BOTH outgoing and incoming relationships
+// Incoming are flipped to show from logged-in user's perspective
 // ─────────────────────────────────────────
-router.get('/mine', async (req, res) => {
-  // Relationships I initiated
-  const { data: initiated, error: e1 } = await supabase
+router.get('/mine', authMiddleware, async (req, res) => {
+  // Get logged-in user's gender for flip logic
+  const { data: currentUser } = await supabase
+    .from('pmf_users')
+    .select('gender')
+    .eq('id', req.user.id)
+    .single();
+
+  const userGender = currentUser?.gender || 'male';
+
+  // Relationships I created (outgoing)
+  const { data: outgoing, error: e1 } = await supabase
     .from('pmf_relationships')
     .select(`
       id, relation_type, relation_tamil, verification_status, created_at, verified_at,
@@ -109,11 +165,11 @@ router.get('/mine', async (req, res) => {
     .eq('from_user_id', req.user.id)
     .order('created_at', { ascending: false });
 
-  // Relationships others initiated with me (pending my verification)
-  const { data: received, error: e2 } = await supabase
+  // Relationships others created with me (incoming)
+  const { data: incoming, error: e2 } = await supabase
     .from('pmf_relationships')
     .select(`
-      id, relation_type, relation_tamil, verification_status, created_at,
+      id, relation_type, relation_tamil, verification_status, created_at, verified_at,
       from_user:from_user_id ( id, name, phone, gender, profile_photo )
     `)
     .eq('to_user_id', req.user.id)
@@ -123,34 +179,54 @@ router.get('/mine', async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch relationships' });
   }
 
-  // Pending verification requests waiting for MY action
-  const pendingMyAction = (received || []).filter(r => r.verification_status === 'pending');
+  // Flip incoming relationships to show from MY perspective
+  const flippedIncoming = (incoming || []).map(rel => {
+    const flipped = getFlipped(rel.relation_type, userGender);
+    return {
+      id: rel.id,
+      relation_type: flipped.type,
+      relation_tamil: flipped.tamil,
+      verification_status: rel.verification_status,
+      created_at: rel.created_at,
+      verified_at: rel.verified_at,
+      to_user: rel.from_user, // the other person becomes "to_user" from my perspective
+      is_incoming: true       // flag so frontend knows this was initiated by other person
+    };
+  });
+
+  // Merge outgoing + flipped incoming (avoid duplicates)
+  const outgoingIds = new Set((outgoing || []).map(r => r.id));
+  const uniqueIncoming = flippedIncoming.filter(r => !outgoingIds.has(r.id));
+  const allRelationships = [...(outgoing || []), ...uniqueIncoming];
+
+  // Pending verification — incoming that are pending MY confirmation
+  const pendingMyAction = (incoming || []).filter(r => r.verification_status === 'pending').map(rel => ({
+    ...rel,
+    to_user: rel.from_user
+  }));
 
   return res.json({
     success: true,
     summary: {
-      total_verified: (initiated || []).filter(r => r.verification_status === 'verified').length,
-      pending_sent: (initiated || []).filter(r => r.verification_status === 'pending').length,
+      total_verified: allRelationships.filter(r => r.verification_status === 'verified').length,
+      pending_sent: (outgoing || []).filter(r => r.verification_status === 'pending').length,
       pending_my_action: pendingMyAction.length
     },
-    my_relationships: initiated || [],
+    my_relationships: allRelationships.filter(r => r.verification_status === 'verified'),
     pending_verification: pendingMyAction
   });
 });
 
 // ─────────────────────────────────────────
 // POST /api/relationships/verify
-// Confirm a relationship request someone sent to me
-// Body: { relationship_id }
 // ─────────────────────────────────────────
-router.post('/verify', async (req, res) => {
+router.post('/verify', authMiddleware, async (req, res) => {
   const { relationship_id } = req.body;
 
   if (!relationship_id) {
     return res.status(400).json({ error: 'relationship_id is required' });
   }
 
-  // Find the relationship — must be directed TO me and still pending
   const { data: rel, error: fetchError } = await supabase
     .from('pmf_relationships')
     .select('*')
@@ -160,12 +236,9 @@ router.post('/verify', async (req, res) => {
     .single();
 
   if (fetchError || !rel) {
-    return res.status(404).json({
-      error: 'Relationship request not found or already actioned'
-    });
+    return res.status(404).json({ error: 'Relationship request not found or already actioned' });
   }
 
-  // Mark as verified
   const { error: updateError } = await supabase
     .from('pmf_relationships')
     .update({
@@ -178,7 +251,6 @@ router.post('/verify', async (req, res) => {
     return res.status(500).json({ error: 'Failed to verify relationship' });
   }
 
-  // Run inference engine for both users
   await runInference(rel.from_user_id);
   await runInference(rel.to_user_id);
 
@@ -190,10 +262,8 @@ router.post('/verify', async (req, res) => {
 
 // ─────────────────────────────────────────
 // POST /api/relationships/reject
-// Reject a relationship request
-// Body: { relationship_id }
 // ─────────────────────────────────────────
-router.post('/reject', async (req, res) => {
+router.post('/reject', authMiddleware, async (req, res) => {
   const { relationship_id } = req.body;
 
   if (!relationship_id) {
@@ -209,9 +279,7 @@ router.post('/reject', async (req, res) => {
     .single();
 
   if (fetchError || !rel) {
-    return res.status(404).json({
-      error: 'Relationship request not found or already actioned'
-    });
+    return res.status(404).json({ error: 'Relationship request not found or already actioned' });
   }
 
   const { error: updateError } = await supabase
@@ -223,10 +291,7 @@ router.post('/reject', async (req, res) => {
     return res.status(500).json({ error: 'Failed to reject relationship' });
   }
 
-  return res.json({
-    success: true,
-    message: 'Relationship request rejected.'
-  });
+  return res.json({ success: true, message: 'Relationship request rejected.' });
 });
 
 module.exports = router;
