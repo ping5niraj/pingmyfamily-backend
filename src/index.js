@@ -50,5 +50,5 @@ process.on('unhandledRejection', (reason) => {
 // ─── Start ─────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`PingMyFamily API running on port ${PORT}`);
-  console.log(`[DEV] OTP is hardcoded: ${process.env.DEV_OTP || '123456'}`);
+ 
 });
