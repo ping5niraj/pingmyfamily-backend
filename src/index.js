@@ -19,6 +19,7 @@ app.use('/api/photos',        require('./routes/photos'));
 app.use('/api/messages',      require('./routes/messages'));
 app.use('/api/locations',     require('./routes/locations'));
 app.use('/api/birthdays',     require('./routes/birthdays'));
+app.use('/api/quiz',          require('./routes/quiz'));
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });

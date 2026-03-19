@@ -2,62 +2,118 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const supabase = require('../supabase');
+const admin = require('firebase-admin');
 
-// In-memory OTP store
-const otpStore = {};
+// Initialize Firebase Admin (only once)
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    })
+  });
+}
 
+// ─────────────────────────────────────────
+// POST /api/auth/firebase-verify
+// Verify Firebase ID token → login or register
+// ─────────────────────────────────────────
+router.post('/firebase-verify', async (req, res) => {
+  const { id_token, phone } = req.body;
+
+  if (!id_token || !phone) {
+    return res.status(400).json({ error: 'id_token and phone are required' });
+  }
+
+  try {
+    // Verify token with Firebase Admin
+    const decodedToken = await admin.auth().verifyIdToken(id_token);
+    console.log('[Firebase] Token verified for:', decodedToken.phone_number);
+
+    const normalised = phone.replace(/\s+/g, '');
+
+    // Check if user exists
+    const { data: existingUser, error: fetchError } = await supabase
+      .from('pmf_users')
+      .select('*')
+      .eq('phone', normalised)
+      .single();
+
+    if (fetchError && fetchError.code !== 'PGRST116') {
+      return res.status(500).json({ error: 'Database error' });
+    }
+
+    if (existingUser) {
+      const token = jwt.sign(
+        { id: existingUser.id, phone: existingUser.phone },
+        process.env.JWT_SECRET,
+        { expiresIn: '30d' }
+      );
+      return res.json({
+        success: true,
+        isNewUser: false,
+        token,
+        user: {
+          id: existingUser.id,
+          name: existingUser.name,
+          phone: existingUser.phone,
+          gender: existingUser.gender,
+          profile_photo: existingUser.profile_photo
+        }
+      });
+    }
+
+    // New user
+    const tempToken = jwt.sign(
+      { phone: normalised, isTemp: true },
+      process.env.JWT_SECRET,
+      { expiresIn: '30m' }
+    );
+
+    return res.json({
+      success: true,
+      isNewUser: true,
+      tempToken,
+      message: 'Phone verified — complete registration'
+    });
+
+  } catch (err) {
+    console.error('[Firebase] Token verification error:', err.message);
+    return res.status(401).json({
+      error: 'Firebase token verification failed: ' + err.message
+    });
+  }
+});
+
+// ─── DEV fallback ──────────────────────────────────────────
 router.get('/send-otp', (req, res) => {
   res.json({ message: 'Use POST /api/auth/send-otp with { phone }' });
 });
 
-// POST /api/auth/send-otp
 router.post('/send-otp', async (req, res) => {
   const { phone } = req.body;
-  if (!phone) return res.status(400).json({ error: 'Phone number is required' });
-
+  if (!phone) return res.status(400).json({ error: 'Phone required' });
   const normalised = phone.replace(/\s+/g, '');
   const otp = process.env.DEV_OTP || '123456';
-  const expiresAt = Date.now() + 10 * 60 * 1000;
-
-  otpStore[normalised] = { otp, expiresAt };
   console.log(`[DEV] OTP for ${normalised}: ${otp}`);
-
-  return res.json({
-    success: true,
-    message: 'OTP sent (DEV mode — use 123456)',
-    dev_otp: otp
-  });
+  return res.json({ success: true, message: 'OTP sent (DEV mode)', dev_otp: otp });
 });
 
-// POST /api/auth/verify-otp
 router.post('/verify-otp', async (req, res) => {
   const { phone, otp } = req.body;
-  if (!phone || !otp) return res.status(400).json({ error: 'Phone and OTP are required' });
-
+  if (!phone || !otp) return res.status(400).json({ error: 'Phone and OTP required' });
+  if (otp !== (process.env.DEV_OTP || '123456')) {
+    return res.status(400).json({ error: 'Incorrect OTP' });
+  }
   const normalised = phone.replace(/\s+/g, '');
-  const record = otpStore[normalised];
-
-  if (!record) return res.status(400).json({ error: 'OTP not requested — please request OTP first' });
-  if (Date.now() > record.expiresAt) {
-    delete otpStore[normalised];
-    return res.status(400).json({ error: 'OTP expired — request a new one' });
-  }
-  if (record.otp !== otp) return res.status(400).json({ error: 'Incorrect OTP. Please try again.' });
-
-  delete otpStore[normalised];
-
-  const { data: existingUser, error: fetchError } = await supabase
+  const { data: existingUser } = await supabase
     .from('pmf_users').select('*').eq('phone', normalised).single();
-
-  if (fetchError && fetchError.code !== 'PGRST116') {
-    return res.status(500).json({ error: 'Database error' });
-  }
 
   if (existingUser) {
     const token = jwt.sign(
       { id: existingUser.id, phone: existingUser.phone },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
+      process.env.JWT_SECRET, { expiresIn: '30d' }
     );
     return res.json({
       success: true, isNewUser: false, token,
@@ -71,14 +127,9 @@ router.post('/verify-otp', async (req, res) => {
 
   const tempToken = jwt.sign(
     { phone: normalised, isTemp: true },
-    process.env.JWT_SECRET,
-    { expiresIn: '30m' }
+    process.env.JWT_SECRET, { expiresIn: '30m' }
   );
-
-  return res.json({
-    success: true, isNewUser: true, tempToken,
-    message: 'Phone verified — complete registration'
-  });
+  return res.json({ success: true, isNewUser: true, tempToken });
 });
 
 module.exports = router;
