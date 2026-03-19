@@ -9,20 +9,16 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.json({
-    service: 'PingMyFamily API',
-    status: 'running',
-    version: '1.0.0',
-    phase: 'Phase 2',
-    timestamp: new Date().toISOString()
-  });
+  res.json({ service: 'PingMyFamily API', status: 'running', version: '2.0.0' });
 });
 
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/users', require('./routes/users'));
+app.use('/api/auth',          require('./routes/auth'));
+app.use('/api/users',         require('./routes/users'));
 app.use('/api/relationships', require('./routes/relationships'));
-app.use('/api/photos', require('./routes/photos'));
-app.use('/api/messages', require('./routes/messages'));
+app.use('/api/photos',        require('./routes/photos'));
+app.use('/api/messages',      require('./routes/messages'));
+app.use('/api/locations',     require('./routes/locations'));
+app.use('/api/birthdays',     require('./routes/birthdays'));
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
@@ -31,13 +27,6 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error' });
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err.message);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled Rejection:', reason);
 });
 
 app.listen(PORT, () => {
