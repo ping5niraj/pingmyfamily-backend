@@ -19,14 +19,30 @@ async function findUserByPhone(rawPhone) {
     `+${digits}`,         // +9513430615 (edge case)
   ];
 
+  console.log('[findUserByPhone] rawPhone:', rawPhone, '| digits:', digits);
+
   for (const fmt of formats) {
     const { data, error } = await supabase
       .from('pmf_users')
       .select('id, name, phone, email, telegram_chat_id')
       .eq('phone', fmt)
       .single();
+    console.log('[findUserByPhone] tried:', fmt, '| found:', data?.name || 'null', '| error:', error?.code || 'none');
     if (!error && data) return data;
   }
+
+  // Last resort — fetch all users and do a manual contains check
+  console.log('[findUserByPhone] All formats failed — trying manual search');
+  const { data: allUsers } = await supabase
+    .from('pmf_users')
+    .select('id, name, phone, email, telegram_chat_id');
+  const match = allUsers?.find(u => u.phone && u.phone.replace(/\D/g, '').endsWith(digits));
+  if (match) {
+    console.log('[findUserByPhone] Manual match found:', match.name, match.phone);
+    return match;
+  }
+
+  console.log('[findUserByPhone] No match found for:', rawPhone);
   return null;
 }
 
