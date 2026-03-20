@@ -9,7 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.json({ service: 'PingMyFamily API', status: 'running', version: '2.1.0' });
+  res.json({ service: 'PingMyFamily API', status: 'running', version: '2.2.0' });
 });
 
 app.use('/api/auth',          require('./routes/auth'));
@@ -20,6 +20,7 @@ app.use('/api/messages',      require('./routes/messages'));
 app.use('/api/locations',     require('./routes/locations'));
 app.use('/api/birthdays',     require('./routes/birthdays'));
 app.use('/api/quiz',          require('./routes/quiz'));
+app.use('/api/telegram',      require('./routes/telegram'));
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
