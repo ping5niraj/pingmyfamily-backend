@@ -6,6 +6,30 @@ const { sendEmail, sendTelegram } = require('../services/notifications');
 
 router.use(authMiddleware);
 
+// Helper — normalise phone to match whatever format is stored in DB
+// Tries both: with +91 and without, returns the user whichever matches
+async function findUserByPhone(rawPhone) {
+  const digits = rawPhone.replace(/\D/g, ''); // strip everything except digits
+
+  // Try all common formats stored in DB
+  const formats = [
+    digits,               // 9513430615
+    `+91${digits}`,       // +919513430615
+    `91${digits}`,        // 919513430615
+    `+${digits}`,         // +9513430615 (edge case)
+  ];
+
+  for (const fmt of formats) {
+    const { data, error } = await supabase
+      .from('pmf_users')
+      .select('id, name, phone, email, telegram_chat_id')
+      .eq('phone', fmt)
+      .single();
+    if (!error && data) return data;
+  }
+  return null;
+}
+
 // ─────────────────────────────────────────
 // POST /api/relationships
 // Add a relationship — creates pending request
@@ -18,16 +42,10 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'to_user_phone and relation_type are required' });
   }
 
-  const normalised = to_user_phone.replace(/\s+/g, '');
+  // Find target user — tries all phone formats
+  const toUser = await findUserByPhone(to_user_phone);
 
-  // Find target user
-  const { data: toUser, error: findError } = await supabase
-    .from('pmf_users')
-    .select('id, name, phone, email, telegram_chat_id')
-    .eq('phone', normalised)
-    .single();
-
-  if (findError || !toUser) {
+  if (!toUser) {
     return res.status(404).json({ error: 'No user found with that phone number. They need to register on frootze first.' });
   }
 
@@ -71,10 +89,11 @@ router.post('/', async (req, res) => {
     .select().single();
 
   if (createError) {
+    console.error('Create relationship error:', createError);
     return res.status(500).json({ error: 'Failed to create relationship' });
   }
 
-  // Also create in-app notification message
+  // Create in-app notification message
   const { data: message } = await supabase
     .from('pmf_messages')
     .insert({
@@ -93,10 +112,9 @@ router.post('/', async (req, res) => {
     });
   }
 
-  // Send notifications in background
+  // Send notifications
   const notifResults = { email: false, telegram: false };
 
-  // Email notification
   if (toUser.email) {
     const emailResult = await sendEmail({
       to_email: toUser.email,
@@ -107,7 +125,6 @@ router.post('/', async (req, res) => {
     notifResults.email = emailResult.success;
   }
 
-  // Telegram notification
   if (toUser.telegram_chat_id) {
     const telegramResult = await sendTelegram({
       chat_id: toUser.telegram_chat_id,
@@ -118,11 +135,14 @@ router.post('/', async (req, res) => {
     notifResults.telegram = telegramResult.success;
   }
 
+  // Use digits-only for WhatsApp link
+  const digitsOnly = to_user_phone.replace(/\D/g, '').replace(/^91/, '');
+
   return res.json({
     success: true,
     relationship,
     notifications: notifResults,
-    whatsapp_link: `https://wa.me/91${normalised}?text=${encodeURIComponent(
+    whatsapp_link: `https://wa.me/91${digitsOnly}?text=${encodeURIComponent(
       `🌳 வணக்கம்!\n\n${fromUser?.name} frootze-ல் உங்களை ${relation_tamil} ஆக சேர்க்க கோரிக்கை அனுப்பியுள்ளார்.\n\nஏற்க frootze.com திறக்கவும்:\nhttps://frootze.com\n\n_${fromUser?.name} sent you a family request on frootze._`
     )}`
   });
@@ -195,11 +215,9 @@ router.post('/verify', async (req, res) => {
     .update({ verification_status: 'verified', verified_at: new Date().toISOString() })
     .eq('id', relationship_id);
 
-  // Get acceptor info
   const { data: acceptor } = await supabase
     .from('pmf_users').select('name').eq('id', req.user.id).single();
 
-  // Notify the requester that request was accepted
   if (rel.from_user?.telegram_chat_id) {
     await sendTelegram({
       chat_id: rel.from_user.telegram_chat_id,
