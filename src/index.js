@@ -12,6 +12,14 @@ app.get('/', (req, res) => {
   res.json({ service: 'PingMyFamily API', status: 'running', version: '2.2.0' });
 });
 
+// ─── DB TEST ROUTE — remove after fixing ───
+app.get('/test-db', async (req, res) => {
+  const supabase = require('./supabase');
+  const { data, error } = await supabase.from('pmf_users').select('id, name, phone').limit(3);
+  res.json({ data, error, url: process.env.SUPABASE_URL });
+});
+// ───────────────────────────────────────────
+
 app.use('/api/auth',          require('./routes/auth'));
 app.use('/api/users',         require('./routes/users'));
 app.use('/api/relationships', require('./routes/relationships'));
