@@ -2,194 +2,110 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../supabase');
 const authMiddleware = require('../middleware/auth');
+const { sendTelegramInvite } = require('../services/telegram');
 
 router.use(authMiddleware);
 
 // ─────────────────────────────────────────
-// POST /api/messages/send
-// Send personal/group/broadcast/announcement
-// Body: { message_type, content, subject?, to_user_ids? }
+// POST /api/messages/send-telegram
+// Send Telegram invite notification
 // ─────────────────────────────────────────
-router.post('/send', async (req, res) => {
-  const { message_type, content, subject, to_user_ids } = req.body;
+router.post('/send-telegram', async (req, res) => {
+  const { to_username, from_name, relation_tamil, invite_link } = req.body;
+  if (!to_username) return res.status(400).json({ error: 'Telegram username required' });
 
-  if (!content) return res.status(400).json({ error: 'Message content is required' });
-  if (!message_type) return res.status(400).json({ error: 'message_type is required' });
-
-  // Get all verified relationships for this user
-  const { data: relationships } = await supabase
-    .from('pmf_relationships')
-    .select('from_user_id, to_user_id')
-    .or(`from_user_id.eq.${req.user.id},to_user_id.eq.${req.user.id}`)
-    .eq('verification_status', 'verified');
-
-  // Build recipient list
-  let recipientIds = [];
-
-  if (message_type === 'personal') {
-    // Must provide exactly one recipient
-    if (!to_user_ids || to_user_ids.length !== 1) {
-      return res.status(400).json({ error: 'Personal message requires exactly one recipient' });
-    }
-    recipientIds = to_user_ids;
-
-  } else if (message_type === 'group') {
-    // Selected members
-    if (!to_user_ids || to_user_ids.length === 0) {
-      return res.status(400).json({ error: 'Group message requires at least one recipient' });
-    }
-    recipientIds = to_user_ids;
-
-  } else if (message_type === 'broadcast' || message_type === 'announcement') {
-    // All verified family members
-    const verifiedIds = new Set();
-    relationships?.forEach(rel => {
-      if (rel.from_user_id === req.user.id) verifiedIds.add(rel.to_user_id);
-      if (rel.to_user_id === req.user.id) verifiedIds.add(rel.from_user_id);
-    });
-    recipientIds = [...verifiedIds];
-
-    if (recipientIds.length === 0) {
-      return res.status(400).json({ error: 'No verified family members to send to' });
-    }
-  }
-
-  // Create message
-  const { data: message, error: msgError } = await supabase
-    .from('pmf_messages')
-    .insert({
-      from_user_id: req.user.id,
-      message_type,
-      subject: subject?.trim() || null,
-      content: content.trim(),
-    })
-    .select().single();
-
-  if (msgError) {
-    console.error('Message insert error:', msgError);
-    return res.status(500).json({ error: 'Failed to send message' });
-  }
-
-  // Create recipients
-  const recipients = recipientIds.map(uid => ({
-    message_id: message.id,
-    to_user_id: uid,
-    is_read: false
-  }));
-
-  const { error: recError } = await supabase
-    .from('pmf_message_recipients')
-    .insert(recipients);
-
-  if (recError) {
-    console.error('Recipients insert error:', recError);
-    return res.status(500).json({ error: 'Failed to save recipients' });
-  }
-
-  return res.json({
-    success: true,
-    message: `Message sent to ${recipientIds.length} member(s)`,
-    message_id: message.id,
-    recipient_count: recipientIds.length
-  });
-});
-
-// ─────────────────────────────────────────
-// GET /api/messages/inbox
-// Get all messages received by logged-in user
-// ─────────────────────────────────────────
-router.get('/inbox', async (req, res) => {
-  const { data: received, error } = await supabase
-    .from('pmf_message_recipients')
-    .select(`
-      id, is_read, read_at, created_at,
-      message:message_id (
-        id, message_type, subject, content, created_at,
-        from_user:from_user_id ( id, name, profile_photo )
-      )
-    `)
-    .eq('to_user_id', req.user.id)
-    .order('created_at', { ascending: false })
-    .limit(50);
-
-  if (error) return res.status(500).json({ error: 'Failed to fetch inbox' });
-
-  const unreadCount = received?.filter(r => !r.is_read).length || 0;
-
-  return res.json({
-    success: true,
-    unread_count: unreadCount,
-    messages: received || []
-  });
-});
-
-// ─────────────────────────────────────────
-// GET /api/messages/sent
-// Get messages sent by logged-in user
-// ─────────────────────────────────────────
-router.get('/sent', async (req, res) => {
-  const { data: sent, error } = await supabase
-    .from('pmf_messages')
-    .select(`
-      id, message_type, subject, content, created_at,
-      recipients:pmf_message_recipients (
-        id, is_read, to_user_id,
-        to_user:to_user_id ( id, name, profile_photo )
-      )
-    `)
-    .eq('from_user_id', req.user.id)
-    .order('created_at', { ascending: false })
-    .limit(50);
-
-  if (error) return res.status(500).json({ error: 'Failed to fetch sent messages' });
-
-  return res.json({ success: true, messages: sent || [] });
-});
-
-// ─────────────────────────────────────────
-// PUT /api/messages/:id/read
-// Mark message as read
-// ─────────────────────────────────────────
-router.put('/:id/read', async (req, res) => {
-  const { error } = await supabase
-    .from('pmf_message_recipients')
-    .update({ is_read: true, read_at: new Date().toISOString() })
-    .eq('message_id', req.params.id)
-    .eq('to_user_id', req.user.id);
-
-  if (error) return res.status(500).json({ error: 'Failed to mark as read' });
-  return res.json({ success: true });
+  const result = await sendTelegramInvite({ to_username, from_name, relation_tamil, invite_link });
+  if (result.success) return res.json({ success: true });
+  return res.status(500).json({ error: result.error || 'Telegram send failed' });
 });
 
 // ─────────────────────────────────────────
 // GET /api/messages/family-members
-// Get verified family members for recipient selection
+// Get verified family members for messaging
 // ─────────────────────────────────────────
 router.get('/family-members', async (req, res) => {
   const { data: outgoing } = await supabase
     .from('pmf_relationships')
-    .select('to_user:to_user_id ( id, name, profile_photo ), relation_tamil')
+    .select('to_user:to_user_id(id, name, profile_photo), relation_tamil')
     .eq('from_user_id', req.user.id)
     .eq('verification_status', 'verified');
 
   const { data: incoming } = await supabase
     .from('pmf_relationships')
-    .select('from_user:from_user_id ( id, name, profile_photo ), relation_tamil')
+    .select('from_user:from_user_id(id, name, profile_photo), relation_tamil')
     .eq('to_user_id', req.user.id)
     .eq('verification_status', 'verified');
 
-  const members = new Map();
+  const members = [
+    ...(outgoing?.map(r => ({ ...r.to_user, relation_tamil: r.relation_tamil })) || []),
+    ...(incoming?.map(r => ({ ...r.from_user, relation_tamil: r.relation_tamil })) || []),
+  ];
 
-  outgoing?.forEach(r => {
-    if (r.to_user) members.set(r.to_user.id, { ...r.to_user, relation_tamil: r.relation_tamil });
-  });
-  incoming?.forEach(r => {
-    if (r.from_user && !members.has(r.from_user.id)) {
-      members.set(r.from_user.id, { ...r.from_user, relation_tamil: r.relation_tamil });
-    }
-  });
+  // Remove duplicates
+  const unique = members.filter((m, i, self) => self.findIndex(x => x.id === m.id) === i);
+  return res.json({ success: true, members: unique });
+});
 
-  return res.json({ success: true, members: [...members.values()] });
+// ─────────────────────────────────────────
+// POST /api/messages/send
+// Send a message
+// ─────────────────────────────────────────
+router.post('/send', async (req, res) => {
+  const { to_user_ids, subject, content, message_type } = req.body;
+  if (!content) return res.status(400).json({ error: 'Content required' });
+
+  const { data: message, error } = await supabase
+    .from('pmf_messages')
+    .insert({ from_user_id: req.user.id, message_type: message_type || 'personal', subject, content })
+    .select().single();
+
+  if (error) return res.status(500).json({ error: 'Failed to send message' });
+
+  if (to_user_ids && to_user_ids.length > 0) {
+    const recipients = to_user_ids.map(uid => ({ message_id: message.id, to_user_id: uid, is_read: false }));
+    await supabase.from('pmf_message_recipients').insert(recipients);
+  }
+
+  return res.json({ success: true, message });
+});
+
+// ─────────────────────────────────────────
+// GET /api/messages/inbox
+// ─────────────────────────────────────────
+router.get('/inbox', async (req, res) => {
+  const { data: recipients } = await supabase
+    .from('pmf_message_recipients')
+    .select(`id, is_read, message:message_id(id, subject, content, message_type, created_at, from_user:from_user_id(id, name, profile_photo))`)
+    .eq('to_user_id', req.user.id)
+    .order('created_at', { ascending: false });
+
+  return res.json({ success: true, messages: recipients || [] });
+});
+
+// ─────────────────────────────────────────
+// GET /api/messages/sent
+// ─────────────────────────────────────────
+router.get('/sent', async (req, res) => {
+  const { data: messages } = await supabase
+    .from('pmf_messages')
+    .select('*')
+    .eq('from_user_id', req.user.id)
+    .order('created_at', { ascending: false });
+
+  return res.json({ success: true, messages: messages || [] });
+});
+
+// ─────────────────────────────────────────
+// PUT /api/messages/:id/read
+// ─────────────────────────────────────────
+router.put('/:id/read', async (req, res) => {
+  await supabase
+    .from('pmf_message_recipients')
+    .update({ is_read: true })
+    .eq('id', req.params.id)
+    .eq('to_user_id', req.user.id);
+
+  return res.json({ success: true });
 });
 
 module.exports = router;
