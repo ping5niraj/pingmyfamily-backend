@@ -77,9 +77,7 @@ router.post('/', async (req, res) => {
     }
 
     return res.json({
-      success: true,
-      relationship,
-      offline: true,
+      success: true, relationship, offline: true,
       message: `${offline_name} குடும்ப மரத்தில் சேர்க்கப்பட்டார்`
     });
   }
@@ -94,16 +92,11 @@ router.post('/', async (req, res) => {
   if (!toUser) {
     const digits = to_user_phone.replace(/\D/g, '');
     await supabase.from('pmf_pending_invites')
-      .delete()
-      .eq('from_user_id', req.user.id)
-      .eq('to_phone', digits);
+      .delete().eq('from_user_id', req.user.id).eq('to_phone', digits);
 
     await supabase.from('pmf_pending_invites').insert({
-      from_user_id: req.user.id,
-      to_phone: digits,
-      relation_type,
-      relation_tamil,
-      status: 'pending'
+      from_user_id: req.user.id, to_phone: digits,
+      relation_type, relation_tamil, status: 'pending'
     });
 
     return res.status(404).json({
@@ -136,13 +129,10 @@ router.post('/', async (req, res) => {
   const { data: relationship, error: createError } = await supabase
     .from('pmf_relationships')
     .insert({
-      from_user_id: req.user.id,
-      to_user_id: toUser.id,
-      relation_type,
-      relation_tamil,
+      from_user_id: req.user.id, to_user_id: toUser.id,
+      relation_type, relation_tamil,
       verification_status: 'pending',
-      created_by: req.user.id,
-      is_offline: false
+      created_by: req.user.id, is_offline: false
     })
     .select().single();
 
@@ -181,14 +171,23 @@ router.post('/', async (req, res) => {
 
 // ─────────────────────────────────────────
 // GET /api/relationships/mine
+// Now includes kutham for color coding
 // ─────────────────────────────────────────
 router.get('/mine', async (req, res) => {
+
+  // Get current user's kutham for reference
+  const { data: currentUser } = await supabase
+    .from('pmf_users')
+    .select('id, name, gender, kutham')
+    .eq('id', req.user.id)
+    .single();
+
   const { data: outgoing } = await supabase
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status, created_at,
       is_offline, offline_name, offline_gender,
-      to_user:to_user_id(id, name, phone),
-      from_user:from_user_id(id, gender)`)
+      to_user:to_user_id(id, name, phone, kutham),
+      from_user:from_user_id(id, gender, kutham)`)
     .eq('from_user_id', req.user.id)
     .order('created_at', { ascending: false });
 
@@ -196,8 +195,8 @@ router.get('/mine', async (req, res) => {
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status, created_at,
       is_offline, offline_name, offline_gender,
-      to_user:from_user_id(id, name, phone),
-      from_user:from_user_id(id, gender)`)
+      to_user:from_user_id(id, name, phone, kutham),
+      from_user:from_user_id(id, gender, kutham)`)
     .eq('to_user_id', req.user.id)
     .eq('verification_status', 'verified')
     .order('created_at', { ascending: false });
@@ -209,18 +208,16 @@ router.get('/mine', async (req, res) => {
     .eq('to_user_id', req.user.id)
     .eq('verification_status', 'pending');
 
-  // Outgoing verified — label stays as defined
   const outgoingVerified = (outgoing || [])
     .filter(r => r.verification_status === 'verified')
     .map(r => ({
       ...r,
-      // For offline members, build a fake to_user object from offline fields
       to_user: r.is_offline
-        ? { id: `offline-${r.id}`, name: r.offline_name, phone: null, is_offline: true, offline_gender: r.offline_gender }
+        ? { id: `offline-${r.id}`, name: r.offline_name, phone: null,
+            is_offline: true, offline_gender: r.offline_gender, kutham: null }
         : r.to_user
     }));
 
-  // Incoming verified — reverse the label
   const incomingVerified = (incoming || []).map(r => {
     const reversed = getReverseRelation(r.relation_type, r.from_user?.gender);
     return { ...r, relation_type: reversed.type, relation_tamil: reversed.tamil };
@@ -232,6 +229,7 @@ router.get('/mine', async (req, res) => {
     success: true,
     my_relationships: allVerified,
     pending_verification: pendingMyAction || [],
+    current_user_kutham: currentUser?.kutham || null,
     summary: {
       total_verified: allVerified.length,
       pending_sent: (outgoing || []).filter(r => r.verification_status === 'pending').length,
@@ -259,10 +257,14 @@ router.post('/verify', async (req, res) => {
     .update({ verification_status: 'verified', verified_at: new Date().toISOString() })
     .eq('id', relationship_id);
 
-  const { data: acceptor } = await supabase.from('pmf_users').select('name').eq('id', req.user.id).single();
+  const { data: acceptor } = await supabase
+    .from('pmf_users').select('name').eq('id', req.user.id).single();
 
   if (rel.from_user?.email) {
-    await sendEmail({ to_email: rel.from_user.email, from_name: acceptor?.name, relation_tamil: rel.relation_tamil, type: 'accepted' });
+    await sendEmail({
+      to_email: rel.from_user.email, from_name: acceptor?.name,
+      relation_tamil: rel.relation_tamil, type: 'accepted'
+    });
   }
 
   return res.json({ success: true, message: 'உறவு சரிபார்க்கப்பட்டது / Relationship verified' });
@@ -278,6 +280,79 @@ router.post('/reject', async (req, res) => {
     .eq('id', relationship_id)
     .eq('to_user_id', req.user.id);
   return res.json({ success: true, message: 'நிராகரிக்கப்பட்டது / Rejected' });
+});
+
+// ─────────────────────────────────────────
+// GET /api/tree/:user_id
+// Extended family tree — 4 generations above, 2 below
+// ─────────────────────────────────────────
+router.get('/tree/:user_id', async (req, res) => {
+  const rootId = req.params.user_id;
+  const visited = new Set();
+  const nodes = [];
+
+  // BFS traversal
+  async function traverse(userId, generation) {
+    if (visited.has(userId)) return;
+    if (generation > 4 || generation < -2) return;
+    visited.add(userId);
+
+    const { data: rels } = await supabase
+      .from('pmf_relationships')
+      .select(`id, relation_type, relation_tamil, verification_status,
+        is_offline, offline_name, offline_gender,
+        to_user:to_user_id(id, name, phone, kutham, gender),
+        from_user:from_user_id(id, name, phone, kutham, gender)`)
+      .eq('from_user_id', userId)
+      .eq('verification_status', 'verified');
+
+    for (const rel of rels || []) {
+      const isAncestor = ['father', 'mother'].includes(rel.relation_type);
+      const isDescendant = ['son', 'daughter'].includes(rel.relation_type);
+
+      const nextGen = isAncestor ? generation + 1
+                    : isDescendant ? generation - 1
+                    : generation;
+
+      if (nextGen > 4 || nextGen < -2) continue;
+
+      if (rel.is_offline) {
+        nodes.push({
+          id: `offline-${rel.id}`,
+          name: rel.offline_name,
+          kutham: null,
+          relation_type: rel.relation_type,
+          relation_tamil: rel.relation_tamil,
+          generation: nextGen,
+          is_offline: true,
+          offline_gender: rel.offline_gender,
+          verified: true,
+          added_by: userId
+        });
+      } else if (rel.to_user) {
+        nodes.push({
+          id: rel.to_user.id,
+          name: rel.to_user.name,
+          kutham: rel.to_user.kutham,
+          relation_type: rel.relation_type,
+          relation_tamil: rel.relation_tamil,
+          generation: nextGen,
+          is_offline: false,
+          verified: true,
+          added_by: userId
+        });
+
+        // Recurse for ancestors/descendants only
+        if (isAncestor || isDescendant) {
+          await traverse(rel.to_user.id, nextGen);
+        }
+      }
+    }
+  }
+
+  await traverse(rootId, 0);
+
+  return res.json({ success: true, nodes, root_id: rootId });
 });
 
 module.exports = router;
