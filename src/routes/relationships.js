@@ -7,44 +7,31 @@ const { sendEmail, sendTelegram } = require('../services/notifications');
 
 router.use(authMiddleware);
 
-// Helper — normalise phone to match whatever format is stored in DB
-// Tries both: with +91 and without, returns the user whichever matches
+// Helper — find user by phone, handles any format
 async function findUserByPhone(rawPhone) {
-  const digits = rawPhone.replace(/\D/g, ''); // strip everything except digits
+  const digits = rawPhone.replace(/\D/g, '');
+  console.log('[findUserByPhone] looking for digits:', digits);
 
-  // Try all common formats stored in DB
-  const formats = [
-    digits,               // 9513430615
-    `+91${digits}`,       // +919513430615
-    `91${digits}`,        // 919513430615
-    `+${digits}`,         // +9513430615 (edge case)
-  ];
-
-  console.log('[findUserByPhone] rawPhone:', rawPhone, '| digits:', digits);
-
-  for (const fmt of formats) {
-    const { data, error } = await supabase
-      .from('pmf_users')
-      .select('id, name, phone, email, telegram_chat_id')
-      .eq('phone', fmt)
-      .single();
-    console.log('[findUserByPhone] tried:', fmt, '| found:', data?.name || 'null', '| error:', error?.code || 'none');
-    if (!error && data) return data;
-  }
-
-  // Last resort — fetch all users and do a manual contains check
-  console.log('[findUserByPhone] All formats failed — trying manual search');
-  const { data: allUsers } = await supabase
+  const { data: allUsers, error } = await supabase
     .from('pmf_users')
-    .select('id, name, phone, email, telegram_chat_id');
-  const match = allUsers?.find(u => u.phone && u.phone.replace(/\D/g, '').endsWith(digits));
-  if (match) {
-    console.log('[findUserByPhone] Manual match found:', match.name, match.phone);
-    return match;
+    .select('*');
+
+  if (error) {
+    console.log('[findUserByPhone] DB error:', error.message, '| code:', error.code);
+    return null;
   }
 
-  console.log('[findUserByPhone] No match found for:', rawPhone);
-  return null;
+  console.log('[findUserByPhone] total users in DB:', allUsers?.length);
+
+  const match = allUsers?.find(u => {
+    const stored = (u.phone || '').replace(/\D/g, '');
+    return stored === digits || stored.endsWith(digits) || digits.endsWith(stored);
+  });
+
+  if (match) console.log('[findUserByPhone] found:', match.name, match.phone);
+  else console.log('[findUserByPhone] no match found for:', digits);
+
+  return match || null;
 }
 
 // ─────────────────────────────────────────
