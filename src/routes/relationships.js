@@ -159,14 +159,14 @@ router.get('/mine', async (req, res) => {
   const { data: outgoing } = await supabase
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status, created_at,
-      to_user:to_user_id(id, name, phone, profile_photo)`)
+      to_user:to_user_id(id, name, phone)`)
     .eq('from_user_id', req.user.id)
     .order('created_at', { ascending: false });
 
   const { data: incoming } = await supabase
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status, created_at,
-      to_user:from_user_id(id, name, phone, profile_photo)`)
+      to_user:from_user_id(id, name, phone)`)
     .eq('to_user_id', req.user.id)
     .eq('verification_status', 'verified')
     .order('created_at', { ascending: false });
@@ -175,7 +175,7 @@ router.get('/mine', async (req, res) => {
   const { data: pendingMyAction } = await supabase
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status,
-      to_user:from_user_id(id, name, phone, profile_photo)`)
+      to_user:from_user_id(id, name, phone)`)
     .eq('to_user_id', req.user.id)
     .eq('verification_status', 'pending');
 
@@ -207,7 +207,7 @@ router.post('/verify', async (req, res) => {
 
   const { data: rel } = await supabase
     .from('pmf_relationships')
-    .select('*, from_user:from_user_id(id, name, email, telegram_chat_id)')
+    .select('*, from_user:from_user_id(id, name, email)')
     .eq('id', relationship_id)
     .eq('to_user_id', req.user.id)
     .single();
