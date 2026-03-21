@@ -40,18 +40,59 @@ async function findUserByPhone(rawPhone) {
 // POST /api/relationships
 // ─────────────────────────────────────────
 router.post('/', async (req, res) => {
-  const { to_user_phone, relation_type, relation_tamil } = req.body;
+  const { to_user_phone, relation_type, relation_tamil,
+          is_offline, offline_name, offline_gender } = req.body;
 
-  if (!to_user_phone || !relation_type) {
-    return res.status(400).json({ error: 'to_user_phone and relation_type are required' });
+  if (!relation_type) {
+    return res.status(400).json({ error: 'relation_type is required' });
+  }
+
+  // ── OFFLINE / DECEASED MEMBER FLOW ──
+  if (is_offline) {
+    if (!offline_name) {
+      return res.status(400).json({ error: 'offline_name is required for offline members' });
+    }
+
+    const { data: fromUser } = await supabase
+      .from('pmf_users').select('id, name, phone, gender').eq('id', req.user.id).single();
+
+    const { data: relationship, error: createError } = await supabase
+      .from('pmf_relationships')
+      .insert({
+        from_user_id: req.user.id,
+        to_user_id: null,
+        relation_type,
+        relation_tamil,
+        verification_status: 'verified',
+        created_by: req.user.id,
+        is_offline: true,
+        offline_name: offline_name.trim(),
+        offline_gender: offline_gender || 'other'
+      })
+      .select().single();
+
+    if (createError) {
+      console.error('Offline relationship error:', createError);
+      return res.status(500).json({ error: 'Failed to create offline relationship' });
+    }
+
+    return res.json({
+      success: true,
+      relationship,
+      offline: true,
+      message: `${offline_name} குடும்ப மரத்தில் சேர்க்கப்பட்டார்`
+    });
+  }
+
+  // ── ONLINE MEMBER FLOW ──
+  if (!to_user_phone) {
+    return res.status(400).json({ error: 'to_user_phone is required' });
   }
 
   const toUser = await findUserByPhone(to_user_phone);
 
-  // ── User NOT registered — save pending invite so auto-link fires on registration
   if (!toUser) {
     const digits = to_user_phone.replace(/\D/g, '');
-    // Remove any existing pending invite for same pair
     await supabase.from('pmf_pending_invites')
       .delete()
       .eq('from_user_id', req.user.id)
@@ -100,7 +141,8 @@ router.post('/', async (req, res) => {
       relation_type,
       relation_tamil,
       verification_status: 'pending',
-      created_by: req.user.id
+      created_by: req.user.id,
+      is_offline: false
     })
     .select().single();
 
@@ -109,7 +151,6 @@ router.post('/', async (req, res) => {
     return res.status(500).json({ error: 'Failed to create relationship' });
   }
 
-  // In-app notification
   const { data: message } = await supabase.from('pmf_messages').insert({
     from_user_id: req.user.id,
     message_type: 'personal',
@@ -145,6 +186,7 @@ router.get('/mine', async (req, res) => {
   const { data: outgoing } = await supabase
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status, created_at,
+      is_offline, offline_name, offline_gender,
       to_user:to_user_id(id, name, phone),
       from_user:from_user_id(id, gender)`)
     .eq('from_user_id', req.user.id)
@@ -153,6 +195,7 @@ router.get('/mine', async (req, res) => {
   const { data: incoming } = await supabase
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status, created_at,
+      is_offline, offline_name, offline_gender,
       to_user:from_user_id(id, name, phone),
       from_user:from_user_id(id, gender)`)
     .eq('to_user_id', req.user.id)
@@ -166,8 +209,18 @@ router.get('/mine', async (req, res) => {
     .eq('to_user_id', req.user.id)
     .eq('verification_status', 'pending');
 
-  const outgoingVerified = (outgoing || []).filter(r => r.verification_status === 'verified');
+  // Outgoing verified — label stays as defined
+  const outgoingVerified = (outgoing || [])
+    .filter(r => r.verification_status === 'verified')
+    .map(r => ({
+      ...r,
+      // For offline members, build a fake to_user object from offline fields
+      to_user: r.is_offline
+        ? { id: `offline-${r.id}`, name: r.offline_name, phone: null, is_offline: true, offline_gender: r.offline_gender }
+        : r.to_user
+    }));
 
+  // Incoming verified — reverse the label
   const incomingVerified = (incoming || []).map(r => {
     const reversed = getReverseRelation(r.relation_type, r.from_user?.gender);
     return { ...r, relation_type: reversed.type, relation_tamil: reversed.tamil };
