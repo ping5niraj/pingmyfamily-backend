@@ -22,6 +22,7 @@ app.use('/api/birthdays',     require('./routes/birthdays'));
 app.use('/api/quiz',          require('./routes/quiz'));
 app.use('/api/telegram',      require('./routes/telegram'));
 app.use('/api/kuthams',        require('./routes/kuthams'));
+app.use('/api/admin',          require('./routes/admin'));
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
