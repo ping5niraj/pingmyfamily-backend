@@ -307,11 +307,20 @@ router.get('/tree/:user_id', async (req, res) => {
       .eq('verification_status', 'verified');
 
     for (const rel of rels || []) {
-      const isAncestor   = ['father', 'mother'].includes(rel.relation_type);
-      const isDescendant = ['son', 'daughter'].includes(rel.relation_type);
+      const isAncestor   = ['father', 'mother',
+        'grandfather_paternal', 'grandmother_paternal',
+        'grandfather_maternal', 'grandmother_maternal'].includes(rel.relation_type);
+      const isDescendant = ['son', 'daughter',
+        'grandson', 'granddaughter'].includes(rel.relation_type);
+      const isGrandparent = rel.relation_type.startsWith('grandfather') ||
+                            rel.relation_type.startsWith('grandmother');
+      const isGrandchild  = rel.relation_type === 'grandson' ||
+                            rel.relation_type === 'granddaughter';
 
-      const nextGen = isAncestor   ? generation + 1
-                    : isDescendant ? generation - 1
+      const nextGen = isGrandparent ? generation + 2
+                    : isGrandchild  ? generation - 2
+                    : isAncestor    ? generation + 1
+                    : isDescendant  ? generation - 1
                     : generation;
 
       if (nextGen > 4 || nextGen < -2) continue;
@@ -380,13 +389,19 @@ function getExtendedLabel(rootToMid, midToTarget) {
   // Direct relation (root is the from_user)
   if (!rootToMid) {
     const DIRECT = {
-      father:   { type: 'father',      tamil: 'அப்பா'         },
-      mother:   { type: 'mother',      tamil: 'அம்மா'         },
-      son:      { type: 'son',         tamil: 'மகன்'          },
-      daughter: { type: 'daughter',    tamil: 'மகள்'          },
-      brother:  { type: 'brother',     tamil: 'அண்ணன்/தம்பி' },
-      sister:   { type: 'sister',      tamil: 'அக்கா/தங்கை'  },
-      spouse:   { type: 'spouse',      tamil: 'மனைவி/கணவன்'  },
+      father:               { type: 'father',               tamil: 'அப்பா'                    },
+      mother:               { type: 'mother',               tamil: 'அம்மா'                    },
+      son:                  { type: 'son',                  tamil: 'மகன்'                     },
+      daughter:             { type: 'daughter',             tamil: 'மகள்'                     },
+      brother:              { type: 'brother',              tamil: 'அண்ணன்/தம்பி'            },
+      sister:               { type: 'sister',               tamil: 'அக்கா/தங்கை'             },
+      spouse:               { type: 'spouse',               tamil: 'மனைவி/கணவன்'             },
+      grandfather_paternal: { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)'  },
+      grandmother_paternal: { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
+      grandfather_maternal: { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)'  },
+      grandmother_maternal: { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
+      grandson:             { type: 'grandson',             tamil: 'பேரன்'                    },
+      granddaughter:        { type: 'granddaughter',        tamil: 'பேத்தி'                   },
     };
     return DIRECT[midToTarget] || { type: midToTarget, tamil: midToTarget };
   }
