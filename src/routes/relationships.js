@@ -161,11 +161,20 @@ router.post('/', async (req, res) => {
   }
 
   const digitsOnly = to_user_phone.replace(/\D/g, '').replace(/^91/, '');
+  const waMsg = [
+    `🌳 *frootze — குடும்ப இணைப்பு கோரிக்கை!*`,
+    ``,
+    `*${fromUser?.name}* உங்களை frootze குடும்ப மரத்தில் *${relation_tamil}* ஆக சேர்க்க கோரிக்கை அனுப்பியுள்ளார்.`,
+    ``,
+    `✅ ஏற்க உங்கள் Dashboard திறக்கவும்:`,
+    `🔗 *https://frootze.com*`,
+    ``,
+    `_frootze — உங்கள் குடும்பம், உங்கள் வேர்கள்_ 🌳`
+  ].join('\n');
+
   return res.json({
     success: true, relationship, notifications: notifResults,
-    whatsapp_link: `https://wa.me/91${digitsOnly}?text=${encodeURIComponent(
-      `🌳 வணக்கம்!\n\n${fromUser?.name} frootze-ல் உங்களை ${relation_tamil} ஆக சேர்க்க கோரிக்கை அனுப்பியுள்ளார்.\n\nஏற்க frootze.com திறக்கவும்:\nhttps://frootze.com`
-    )}`
+    whatsapp_link: `https://wa.me/91${digitsOnly}?text=${encodeURIComponent(waMsg)}`
   });
 });
 
