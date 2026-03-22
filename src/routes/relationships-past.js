@@ -307,23 +307,21 @@ router.get('/tree/:user_id', async (req, res) => {
       .eq('verification_status', 'verified');
 
     for (const rel of rels || []) {
+      const isAncestor   = ['father', 'mother',
+        'grandfather_paternal', 'grandmother_paternal',
+        'grandfather_maternal', 'grandmother_maternal'].includes(rel.relation_type);
+      const isDescendant = ['son', 'daughter',
+        'grandson', 'granddaughter'].includes(rel.relation_type);
       const isGrandparent = rel.relation_type.startsWith('grandfather') ||
                             rel.relation_type.startsWith('grandmother');
       const isGrandchild  = rel.relation_type === 'grandson' ||
                             rel.relation_type === 'granddaughter';
-      const isParent      = rel.relation_type === 'father' || rel.relation_type === 'mother';
-      const isChild       = rel.relation_type === 'son' || rel.relation_type === 'daughter';
-      const isAncestor    = isParent || isGrandparent;
-      const isDescendant  = isChild || isGrandchild;
 
-      // Generation delta from current node
-      const genDelta = isGrandparent ? 2
-                     : isGrandchild  ? -2
-                     : isParent      ? 1
-                     : isChild       ? -1
-                     : 0;
-
-      const nextGen = generation + genDelta;
+      const nextGen = isGrandparent ? generation + 2
+                    : isGrandchild  ? generation - 2
+                    : isAncestor    ? generation + 1
+                    : isDescendant  ? generation - 1
+                    : generation;
 
       if (nextGen > 4 || nextGen < -2) continue;
 
@@ -333,8 +331,8 @@ router.get('/tree/:user_id', async (req, res) => {
       const relLabel = getExtendedLabel(relationFromRoot, rel.relation_type);
 
       if (rel.is_offline) {
-        // Use name+gender+addedBy as dedup key to avoid showing same person twice
-        const nodeId = `offline-${userId}-${(rel.offline_name||'').toLowerCase().replace(/\s/g,'-')}`;
+        // Offline/deceased member — add directly
+        const nodeId = `offline-${rel.id}`;
         if (!nodeMap.has(nodeId)) {
           nodeMap.set(nodeId, {
             id: nodeId,
@@ -365,13 +363,8 @@ router.get('/tree/:user_id', async (req, res) => {
           });
         }
 
-        // Recurse up/down the chain for all ancestor/descendant relations
+        // Recurse up/down the chain
         if (isAncestor || isDescendant) {
-          await traverse(rel.to_user.id, nextGen, relLabel.type, relLabel.tamil);
-        }
-        // Also recurse into grandparent nodes to find their parents
-        // This allows 3rd/4th generation to appear correctly
-        else if (isGrandparent || isGrandchild) {
           await traverse(rel.to_user.id, nextGen, relLabel.type, relLabel.tamil);
         }
       }
@@ -416,23 +409,10 @@ function getExtendedLabel(rootToMid, midToTarget) {
   // Extended chain resolution
   const chain = `${rootToMid}→${midToTarget}`;
   const EXTENDED = {
-    // Parent → their parent = grandparent of root
-    'father→father':    { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)' },
-    'father→mother':    { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
-    'mother→father':    { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)' },
-    'mother→mother':    { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
-
-    // Parent → their grandparent = great-grandparent of root
-    'father→grandfather_paternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'father→grandmother_paternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
-    'father→grandfather_maternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'father→grandmother_maternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
-    'mother→grandfather_paternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'mother→grandmother_paternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
-    'mother→grandfather_maternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'mother→grandmother_maternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
-
-    // Grandparent → their parent = great-grandparent of root
+    'father→father':    { type: 'grandfather_paternal', tamil: 'தாத்தா'        },
+    'father→mother':    { type: 'grandmother_paternal', tamil: 'பாட்டி'        },
+    'mother→father':    { type: 'grandfather_maternal', tamil: 'தாத்தா'        },
+    'mother→mother':    { type: 'grandmother_maternal', tamil: 'பாட்டி'        },
     'grandfather_paternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
     'grandfather_paternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
     'grandmother_paternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
@@ -441,24 +421,14 @@ function getExtendedLabel(rootToMid, midToTarget) {
     'grandfather_maternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
     'grandmother_maternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
     'grandmother_maternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
-
-    // Grandparent → their grandparent = great-great-grandparent of root
-    'grandfather_paternal→grandfather_paternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'grandfather_paternal→grandmother_paternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
-    'grandmother_paternal→grandfather_paternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'grandmother_paternal→grandmother_paternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
-
-    // Children chain
-    'son→son':          { type: 'grandson',      tamil: 'பேரன்'  },
-    'son→daughter':     { type: 'granddaughter', tamil: 'பேத்தி' },
-    'daughter→son':     { type: 'grandson',      tamil: 'பேரன்'  },
-    'daughter→daughter':{ type: 'granddaughter', tamil: 'பேத்தி' },
-
-    // Uncle/Aunt
-    'father→brother':   { type: 'uncle_elder',   tamil: 'பெரியப்பா/சித்தப்பா' },
-    'father→sister':    { type: 'aunt_paternal',  tamil: 'அத்தை'                },
-    'mother→brother':   { type: 'uncle_maternal', tamil: 'மாமா'                 },
-    'mother→sister':    { type: 'aunt_maternal',  tamil: 'சித்தி'               },
+    'son→son':          { type: 'grandson',     tamil: 'பேரன்'   },
+    'son→daughter':     { type: 'granddaughter',tamil: 'பேத்தி'  },
+    'daughter→son':     { type: 'grandson',     tamil: 'பேரன்'   },
+    'daughter→daughter':{ type: 'granddaughter',tamil: 'பேத்தி'  },
+    'father→brother':   { type: 'uncle_elder',  tamil: 'பெரியப்பா/சித்தப்பா' },
+    'father→sister':    { type: 'aunt_paternal', tamil: 'அத்தை'  },
+    'mother→brother':   { type: 'uncle_maternal',tamil: 'மாமா'   },
+    'mother→sister':    { type: 'aunt_maternal', tamil: 'சித்தி' },
   };
 
   return EXTENDED[chain] || { type: midToTarget, tamil: midToTarget };
