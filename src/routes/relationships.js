@@ -283,76 +283,140 @@ router.post('/reject', async (req, res) => {
 });
 
 // ─────────────────────────────────────────
-// GET /api/tree/:user_id
+// GET /api/relationships/tree/:user_id
 // Extended family tree — 4 generations above, 2 below
+// Includes offline/deceased members added by relatives
 // ─────────────────────────────────────────
 router.get('/tree/:user_id', async (req, res) => {
   const rootId = req.params.user_id;
   const visited = new Set();
-  const nodes = [];
+  const nodeMap = new Map(); // key = unique id, value = node
 
-  // BFS traversal
-  async function traverse(userId, generation) {
+  async function traverse(userId, generation, relationFromRoot, relationTamilFromRoot) {
     if (visited.has(userId)) return;
     if (generation > 4 || generation < -2) return;
     visited.add(userId);
 
+    // Fetch all verified relationships where this user is the FROM side
     const { data: rels } = await supabase
       .from('pmf_relationships')
       .select(`id, relation_type, relation_tamil, verification_status,
         is_offline, offline_name, offline_gender,
-        to_user:to_user_id(id, name, phone, kutham, gender),
-        from_user:from_user_id(id, name, phone, kutham, gender)`)
+        to_user:to_user_id(id, name, phone, kutham, gender)`)
       .eq('from_user_id', userId)
       .eq('verification_status', 'verified');
 
     for (const rel of rels || []) {
-      const isAncestor = ['father', 'mother'].includes(rel.relation_type);
+      const isAncestor   = ['father', 'mother'].includes(rel.relation_type);
       const isDescendant = ['son', 'daughter'].includes(rel.relation_type);
 
-      const nextGen = isAncestor ? generation + 1
+      const nextGen = isAncestor   ? generation + 1
                     : isDescendant ? generation - 1
                     : generation;
 
       if (nextGen > 4 || nextGen < -2) continue;
 
-      if (rel.is_offline) {
-        nodes.push({
-          id: `offline-${rel.id}`,
-          name: rel.offline_name,
-          kutham: null,
-          relation_type: rel.relation_type,
-          relation_tamil: rel.relation_tamil,
-          generation: nextGen,
-          is_offline: true,
-          offline_gender: rel.offline_gender,
-          verified: true,
-          added_by: userId
-        });
-      } else if (rel.to_user) {
-        nodes.push({
-          id: rel.to_user.id,
-          name: rel.to_user.name,
-          kutham: rel.to_user.kutham,
-          relation_type: rel.relation_type,
-          relation_tamil: rel.relation_tamil,
-          generation: nextGen,
-          is_offline: false,
-          verified: true,
-          added_by: userId
-        });
+      // Determine relation label relative to ROOT user
+      // e.g. if Mani is father of Niranjan, and Mani adds his father →
+      // that person is grandfather of Niranjan
+      const relLabel = getExtendedLabel(relationFromRoot, rel.relation_type);
 
-        // Recurse for ancestors/descendants only
+      if (rel.is_offline) {
+        // Offline/deceased member — add directly
+        const nodeId = `offline-${rel.id}`;
+        if (!nodeMap.has(nodeId)) {
+          nodeMap.set(nodeId, {
+            id: nodeId,
+            name: rel.offline_name,
+            kutham: null,
+            relation_type: relLabel.type,
+            relation_tamil: relLabel.tamil,
+            generation: nextGen,
+            is_offline: true,
+            offline_gender: rel.offline_gender,
+            verified: true,
+            added_by: userId
+          });
+        }
+      } else if (rel.to_user && rel.to_user.id !== rootId) {
+        const nodeId = rel.to_user.id;
+        if (!nodeMap.has(nodeId)) {
+          nodeMap.set(nodeId, {
+            id: nodeId,
+            name: rel.to_user.name,
+            kutham: rel.to_user.kutham,
+            relation_type: relLabel.type,
+            relation_tamil: relLabel.tamil,
+            generation: nextGen,
+            is_offline: false,
+            verified: true,
+            added_by: userId
+          });
+        }
+
+        // Recurse up/down the chain
         if (isAncestor || isDescendant) {
-          await traverse(rel.to_user.id, nextGen);
+          await traverse(rel.to_user.id, nextGen, relLabel.type, relLabel.tamil);
         }
       }
     }
   }
 
-  await traverse(rootId, 0);
+  await traverse(rootId, 0, null, null);
 
-  return res.json({ success: true, nodes, root_id: rootId });
+  return res.json({
+    success: true,
+    nodes: Array.from(nodeMap.values()),
+    root_id: rootId
+  });
 });
+
+// ─────────────────────────────────────────
+// Extended label resolver
+// Given root→intermediate relation and intermediate→target relation,
+// returns the correct label for root→target
+// ─────────────────────────────────────────
+function getExtendedLabel(rootToMid, midToTarget) {
+  // Direct relation (root is the from_user)
+  if (!rootToMid) {
+    const DIRECT = {
+      father:   { type: 'father',      tamil: 'அப்பா'         },
+      mother:   { type: 'mother',      tamil: 'அம்மா'         },
+      son:      { type: 'son',         tamil: 'மகன்'          },
+      daughter: { type: 'daughter',    tamil: 'மகள்'          },
+      brother:  { type: 'brother',     tamil: 'அண்ணன்/தம்பி' },
+      sister:   { type: 'sister',      tamil: 'அக்கா/தங்கை'  },
+      spouse:   { type: 'spouse',      tamil: 'மனைவி/கணவன்'  },
+    };
+    return DIRECT[midToTarget] || { type: midToTarget, tamil: midToTarget };
+  }
+
+  // Extended chain resolution
+  const chain = `${rootToMid}→${midToTarget}`;
+  const EXTENDED = {
+    'father→father':    { type: 'grandfather_paternal', tamil: 'தாத்தா'        },
+    'father→mother':    { type: 'grandmother_paternal', tamil: 'பாட்டி'        },
+    'mother→father':    { type: 'grandfather_maternal', tamil: 'தாத்தா'        },
+    'mother→mother':    { type: 'grandmother_maternal', tamil: 'பாட்டி'        },
+    'grandfather_paternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'grandfather_paternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'grandmother_paternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'grandmother_paternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'grandfather_maternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'grandfather_maternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'grandmother_maternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'grandmother_maternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'son→son':          { type: 'grandson',     tamil: 'பேரன்'   },
+    'son→daughter':     { type: 'granddaughter',tamil: 'பேத்தி'  },
+    'daughter→son':     { type: 'grandson',     tamil: 'பேரன்'   },
+    'daughter→daughter':{ type: 'granddaughter',tamil: 'பேத்தி'  },
+    'father→brother':   { type: 'uncle_elder',  tamil: 'பெரியப்பா/சித்தப்பா' },
+    'father→sister':    { type: 'aunt_paternal', tamil: 'அத்தை'  },
+    'mother→brother':   { type: 'uncle_maternal',tamil: 'மாமா'   },
+    'mother→sister':    { type: 'aunt_maternal', tamil: 'சித்தி' },
+  };
+
+  return EXTENDED[chain] || { type: midToTarget, tamil: midToTarget };
+}
 
 module.exports = router;
