@@ -1,73 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const { createClient } = require('@supabase/supabase-js');
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const supabase = require('../supabase');
 const authMiddleware = require('../middleware/auth');
-
-// ─────────────────────────────────────────
-// Auto-link helper
-// When new user registers, check pmf_pending_invites
-// and automatically create pending relationship requests
-// ─────────────────────────────────────────
-async function processAutoLinks(newUser) {
-  const digits = (newUser.phone || '').replace(/\D/g, '');
-  console.log('[AutoLink] Checking pending invites for:', digits);
-
-  const { data: pendingInvites } = await supabase
-    .from('pmf_pending_invites')
-    .select('*, from_user:from_user_id(id, name, phone)')
-    .eq('to_phone', digits)
-    .eq('status', 'pending');
-
-  if (!pendingInvites || pendingInvites.length === 0) {
-    console.log('[AutoLink] No pending invites found');
-    return;
-  }
-
-  console.log('[AutoLink] Found', pendingInvites.length, 'pending invite(s)');
-
-  for (const invite of pendingInvites) {
-    try {
-      const { error: relError } = await supabase.from('pmf_relationships').insert({
-        from_user_id: invite.from_user_id,
-        to_user_id: newUser.id,
-        relation_type: invite.relation_type,
-        relation_tamil: invite.relation_tamil,
-        verification_status: 'pending',
-        created_by: invite.from_user_id
-      });
-
-      if (relError) {
-        console.log('[AutoLink] Relationship insert error:', relError.message);
-        continue;
-      }
-
-      // In-app notification for new user
-      const { data: message } = await supabase.from('pmf_messages').insert({
-        from_user_id: invite.from_user_id,
-        message_type: 'personal',
-        subject: '🌳 குடும்ப இணைப்பு கோரிக்கை / Family Connection Request',
-        content: `${invite.from_user?.name} உங்களை தங்கள் ${invite.relation_tamil} ஆக சேர்க்க கோருகிறார். Dashboard-ல் ஏற்கவும் அல்லது நிராகரிக்கவும்.\n\n${invite.from_user?.name} wants to add you as ${invite.relation_tamil}. Please accept or reject from your Dashboard.`
-      }).select().single();
-
-      if (message) {
-        await supabase.from('pmf_message_recipients').insert({
-          message_id: message.id, to_user_id: newUser.id, is_read: false
-        });
-      }
-
-      // Mark invite as processed
-      await supabase.from('pmf_pending_invites')
-        .update({ status: 'processed' })
-        .eq('id', invite.id);
-
-      console.log('[AutoLink] Created relationship request from', invite.from_user?.name, 'as', invite.relation_tamil);
-    } catch (e) {
-      console.log('[AutoLink] Error:', e.message);
-    }
-  }
-}
 
 // ─────────────────────────────────────────
 // POST /api/users
@@ -124,9 +59,6 @@ router.post('/', async (req, res) => {
     return res.status(500).json({ error: 'Failed to create user' });
   }
 
-  // ── AUTO-LINK: check pending invites for this phone ──
-  await processAutoLinks(newUser);
-
   const fullToken = jwt.sign(
     { id: newUser.id, phone: newUser.phone },
     process.env.JWT_SECRET,
@@ -158,6 +90,7 @@ router.get('/me', authMiddleware, async (req, res) => {
 
 // ─────────────────────────────────────────
 // PUT /api/users/me
+// Update profile including extended fields
 // ─────────────────────────────────────────
 router.put('/me', authMiddleware, async (req, res) => {
   const {
@@ -195,15 +128,20 @@ router.put('/me', authMiddleware, async (req, res) => {
 
 // ─────────────────────────────────────────
 // GET /api/users/directory
+// Family directory — filter by kutham/pincode/district
 // ─────────────────────────────────────────
 router.get('/directory', authMiddleware, async (req, res) => {
   const { kutham, pincode, district, city, search } = req.query;
 
+  const showAll = req.query.all === 'true';
+
   let query = supabase
     .from('pmf_users')
     .select('id, name, phone, gender, profile_photo, kutham, address, pincode, district, city, created_at')
-    .eq('status', 'active')
-    .not('kutham', 'is', null);
+    .eq('status', 'active');
+
+  // Only filter by kutham existence if not showing all
+  if (!showAll) query = query.not('kutham', 'is', null);
 
   if (kutham) query = query.ilike('kutham', `%${kutham}%`);
   if (pincode) query = query.eq('pincode', pincode);
@@ -216,11 +154,17 @@ router.get('/directory', authMiddleware, async (req, res) => {
     .limit(100);
 
   if (error) return res.status(500).json({ error: 'Failed to fetch directory' });
-  return res.json({ success: true, count: users?.length || 0, users: users || [] });
+
+  return res.json({
+    success: true,
+    count: users?.length || 0,
+    users: users || []
+  });
 });
 
 // ─────────────────────────────────────────
 // GET /api/users/directory/filters
+// Get unique values for filter dropdowns
 // ─────────────────────────────────────────
 router.get('/directory/filters', authMiddleware, async (req, res) => {
   const { data: users, error } = await supabase
