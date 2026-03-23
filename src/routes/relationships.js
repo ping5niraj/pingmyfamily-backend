@@ -195,7 +195,7 @@ router.get('/mine', async (req, res) => {
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status, created_at,
       is_offline, offline_name, offline_gender,
-      to_user:to_user_id(id, name, phone, kutham),
+      to_user:to_user_id(id, name, phone, kutham, profile_photo),
       from_user:from_user_id(id, gender, kutham)`)
     .eq('from_user_id', req.user.id)
     .order('created_at', { ascending: false });
@@ -204,7 +204,7 @@ router.get('/mine', async (req, res) => {
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status, created_at,
       is_offline, offline_name, offline_gender,
-      to_user:from_user_id(id, name, phone, kutham),
+      to_user:from_user_id(id, name, phone, kutham, profile_photo),
       from_user:from_user_id(id, gender, kutham)`)
     .eq('to_user_id', req.user.id)
     .eq('verification_status', 'verified')
@@ -213,7 +213,7 @@ router.get('/mine', async (req, res) => {
   const { data: pendingMyAction } = await supabase
     .from('pmf_relationships')
     .select(`id, relation_type, relation_tamil, verification_status,
-      to_user:from_user_id(id, name, phone)`)
+      to_user:from_user_id(id, name, phone, profile_photo)`)
     .eq('to_user_id', req.user.id)
     .eq('verification_status', 'pending');
 
@@ -223,7 +223,7 @@ router.get('/mine', async (req, res) => {
       ...r,
       to_user: r.is_offline
         ? { id: `offline-${r.id}`, name: r.offline_name, phone: null,
-            is_offline: true, offline_gender: r.offline_gender, kutham: null }
+            is_offline: true, offline_gender: r.offline_gender, kutham: null, profile_photo: null }
         : r.to_user
     }));
 
@@ -311,7 +311,7 @@ router.get('/tree/:user_id', async (req, res) => {
       .from('pmf_relationships')
       .select(`id, relation_type, relation_tamil, verification_status,
         is_offline, offline_name, offline_gender,
-        to_user:to_user_id(id, name, phone, kutham, gender)`)
+        to_user:to_user_id(id, name, phone, kutham, gender, profile_photo)`)
       .eq('from_user_id', userId)
       .eq('verification_status', 'verified');
 
