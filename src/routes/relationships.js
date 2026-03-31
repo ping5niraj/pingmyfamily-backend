@@ -492,4 +492,189 @@ function getExtendedLabel(rootToMid, midToTarget) {
   return EXTENDED[chain] || { type: midToTarget, tamil: midToTarget };
 }
 
+// ─────────────────────────────────────────
+// GET /api/relationships/chain-detect
+// Detects connection chain between current user and a target phone
+// Query: ?to_phone=9943125881
+// ─────────────────────────────────────────
+router.get('/chain-detect', async (req, res) => {
+  const { to_phone } = req.query;
+  const fromUserId = req.user.id;
+
+  if (!to_phone) return res.status(400).json({ error: 'to_phone is required' });
+
+  // Step 1: Find target user by phone
+  const targetUser = await findUserByPhone(to_phone);
+  if (!targetUser) return res.json({ success: true, target_found: false, message: 'User not registered on frootze' });
+  if (targetUser.id === fromUserId) return res.json({ success: true, target_found: false, message: 'Cannot add yourself' });
+
+  // Step 2: Get current user's full tree (2 levels deep)
+  const { data: fromUser } = await supabase.from('pmf_users').select('id, name, gender, kutham').eq('id', fromUserId).single();
+
+  // Step 3: Get all of current user's verified relationships (level 1)
+  const { data: level1Rels } = await supabase
+    .from('pmf_relationships')
+    .select(`id, relation_type, relation_tamil, is_offline,
+      to_user:to_user_id(id, name, phone, gender, kutham)`)
+    .eq('from_user_id', fromUserId)
+    .eq('verification_status', 'verified')
+    .eq('is_offline', false);
+
+  const { data: level1Incoming } = await supabase
+    .from('pmf_relationships')
+    .select(`id, relation_type, relation_tamil,
+      from_user:from_user_id(id, name, phone, gender, kutham)`)
+    .eq('to_user_id', fromUserId)
+    .eq('verification_status', 'verified');
+
+  // Build level 1 connections map: userId → { user, relationType, relTamil }
+  const level1Map = new Map();
+
+  for (const r of (level1Rels || [])) {
+    if (r.to_user) {
+      level1Map.set(r.to_user.id, { user: r.to_user, rel_type: r.relation_type, rel_tamil: r.relation_tamil });
+    }
+  }
+  for (const r of (level1Incoming || [])) {
+    if (r.from_user && !level1Map.has(r.from_user.id)) {
+      const rev = getReverseRelation(r.relation_type, r.from_user.gender);
+      level1Map.set(r.from_user.id, { user: r.from_user, rel_type: rev.type, rel_tamil: rev.tamil });
+    }
+  }
+
+  // Step 4: Check if target is directly in level 1
+  if (level1Map.has(targetUser.id)) {
+    const direct = level1Map.get(targetUser.id);
+    return res.json({
+      success: true,
+      target_found: true,
+      already_connected: true,
+      chain: [
+        { user: { id: fromUser.id, name: fromUser.name }, relation_to_next: null, connected: true },
+        { user: { id: targetUser.id, name: targetUser.name }, relation_to_next: direct.rel_type, rel_tamil: direct.rel_tamil, connected: true }
+      ],
+      suggested_relation: null,
+      message: 'Already connected directly'
+    });
+  }
+
+  // Step 5: Check level 2 — for each level1 person, get their relationships
+  for (const [midId, midData] of level1Map) {
+    const { data: level2Rels } = await supabase
+      .from('pmf_relationships')
+      .select(`id, relation_type, relation_tamil, is_offline,
+        to_user:to_user_id(id, name, phone, gender, kutham)`)
+      .eq('from_user_id', midId)
+      .eq('verification_status', 'verified')
+      .eq('is_offline', false);
+
+    const { data: level2Incoming } = await supabase
+      .from('pmf_relationships')
+      .select(`id, relation_type, relation_tamil,
+        from_user:from_user_id(id, name, phone, gender, kutham)`)
+      .eq('to_user_id', midId)
+      .eq('verification_status', 'verified');
+
+    // Check if target is in level2 outgoing
+    for (const r of (level2Rels || [])) {
+      if (r.to_user && r.to_user.id === targetUser.id) {
+        const suggested = inferRelation(midData.rel_type, r.relation_type);
+        return res.json({
+          success: true,
+          target_found: true,
+          already_connected: false,
+          chain: [
+            { user: { id: fromUser.id, name: fromUser.name }, relation_to_next: midData.rel_type, rel_tamil: midData.rel_tamil, connected: true },
+            { user: { id: midData.user.id, name: midData.user.name }, relation_to_next: r.relation_type, rel_tamil: r.relation_tamil, connected: true },
+            { user: { id: targetUser.id, name: targetUser.name }, relation_to_next: null, connected: false }
+          ],
+          suggested_relation: suggested,
+          intermediaries_missing: []
+        });
+      }
+    }
+
+    // Check level2 incoming
+    for (const r of (level2Incoming || [])) {
+      if (r.from_user && r.from_user.id === targetUser.id) {
+        const rev = getReverseRelation(r.relation_type, r.from_user.gender);
+        const suggested = inferRelation(midData.rel_type, rev.type);
+        return res.json({
+          success: true,
+          target_found: true,
+          already_connected: false,
+          chain: [
+            { user: { id: fromUser.id, name: fromUser.name }, relation_to_next: midData.rel_type, rel_tamil: midData.rel_tamil, connected: true },
+            { user: { id: midData.user.id, name: midData.user.name }, relation_to_next: rev.type, rel_tamil: rev.tamil, connected: true },
+            { user: { id: targetUser.id, name: targetUser.name }, relation_to_next: null, connected: false }
+          ],
+          suggested_relation: suggested,
+          intermediaries_missing: []
+        });
+      }
+    }
+  }
+
+  // Step 6: No chain found — return target user only
+  return res.json({
+    success: true,
+    target_found: true,
+    already_connected: false,
+    chain: null,
+    suggested_relation: null,
+    message: 'No family connection found within 2 levels'
+  });
+});
+
+// ─────────────────────────────────────────
+// Relation inference: given chain A→B and B→C, return A→C label
+// ─────────────────────────────────────────
+function inferRelation(aToB, bToC) {
+  const INFER = {
+    // Sibling's children = nephew/niece
+    'brother→son':        { type: 'nephew',   tamil: 'மருமகன்'              },
+    'brother→daughter':   { type: 'niece',    tamil: 'மருமகள்'              },
+    'sister→son':         { type: 'nephew',   tamil: 'மருமகன்'              },
+    'sister→daughter':    { type: 'niece',    tamil: 'மருமகள்'              },
+
+    // Parent's sibling = uncle/aunt
+    'father→brother':     { type: 'uncle_paternal', tamil: 'பெரியப்பா/சித்தப்பா' },
+    'father→sister':      { type: 'aunt_paternal',  tamil: 'அத்தை'               },
+    'mother→brother':     { type: 'uncle_maternal', tamil: 'மாமா'                },
+    'mother→sister':      { type: 'aunt_maternal',  tamil: 'சித்தி'              },
+
+    // Parent's parent = grandparent
+    'father→father':      { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)' },
+    'father→mother':      { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
+    'mother→father':      { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)' },
+    'mother→mother':      { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
+
+    // Child's child = grandchild
+    'son→son':            { type: 'grandson',      tamil: 'பேரன்'   },
+    'son→daughter':       { type: 'granddaughter', tamil: 'பேத்தி'  },
+    'daughter→son':       { type: 'grandson',      tamil: 'பேரன்'   },
+    'daughter→daughter':  { type: 'granddaughter', tamil: 'பேத்தி'  },
+
+    // Spouse's parents = in-laws
+    'spouse→father':      { type: 'father_in_law',  tamil: 'மாமனார்'  },
+    'spouse→mother':      { type: 'mother_in_law',  tamil: 'மாமியார்' },
+    'spouse→brother':     { type: 'brother_in_law', tamil: 'மைத்துனன்' },
+    'spouse→sister':      { type: 'sister_in_law',  tamil: 'நாத்தனார்' },
+
+    // Uncle/aunt's child = cousin
+    'uncle_paternal→son':      { type: 'cousin', tamil: 'உறவினர் (அண்ணன்/தம்பி)' },
+    'uncle_paternal→daughter': { type: 'cousin', tamil: 'உறவினர் (அக்கா/தங்கை)' },
+    'aunt_paternal→son':       { type: 'cousin', tamil: 'உறவினர் (அண்ணன்/தம்பி)' },
+    'aunt_paternal→daughter':  { type: 'cousin', tamil: 'உறவினர் (அக்கா/தங்கை)' },
+    'uncle_maternal→son':      { type: 'cousin', tamil: 'மச்சான்'   },
+    'uncle_maternal→daughter': { type: 'cousin', tamil: 'மச்சினி'   },
+    'aunt_maternal→son':       { type: 'cousin', tamil: 'மச்சான்'   },
+    'aunt_maternal→daughter':  { type: 'cousin', tamil: 'மச்சினி'   },
+  };
+
+  const key = `${aToB}→${bToC}`;
+  return INFER[key] || { type: bToC, tamil: bToC, inferred: false };
+}
+
+
 module.exports = router;
