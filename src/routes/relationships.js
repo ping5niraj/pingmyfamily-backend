@@ -10,26 +10,35 @@ router.use(authMiddleware);
 // ─────────────────────────────────────────
 // Reverse relation mapping
 // ─────────────────────────────────────────
-function getReverseRelation(relation_type, fromUserGender, childGender) {
-  // fromUserGender = gender of person who added the relation
-  // childGender    = gender of the person whose reverse label we are computing
+function getReverseRelation(relation_type, fromUserGender) {
+  // fromUserGender = gender of the person who ADDED the relationship
+  // This function answers: what is the FROM person to the TO person?
 
+  // Parent-child reversal
   if (relation_type === 'son' || relation_type === 'daughter') {
-    // Parent added child → reverse is father/mother based on parent's gender
+    // FROM person is a parent → reverse is father or mother
     if (fromUserGender === 'female') return { type: 'mother', tamil: 'அம்மா' };
     return { type: 'father', tamil: 'அப்பா' };
   }
 
+  // Child-parent reversal
   if (relation_type === 'father' || relation_type === 'mother') {
-    // Child added parent → reverse is son/daughter based on CHILD's gender
-    // childGender here = from_user's gender (the child who added the parent)
-    if (childGender === 'female') return { type: 'daughter', tamil: 'மகள்' };
+    // FROM person is a child → reverse is son or daughter based on FROM person's gender
+    if (fromUserGender === 'female') return { type: 'daughter', tamil: 'மகள்' };
     return { type: 'son', tamil: 'மகன்' };
   }
 
-  if (relation_type === 'brother') return { type: 'brother', tamil: 'அண்ணன்/தம்பி' };
-  if (relation_type === 'sister')  return { type: 'sister',  tamil: 'அக்கா/தங்கை'  };
-  if (relation_type === 'spouse')  return { type: 'spouse',  tamil: 'மனைவி/கணவன்'  };
+  // Sibling reversal — depends on FROM person's gender
+  if (relation_type === 'brother' || relation_type === 'sister') {
+    // Niranjan (male) added Kavitha as sister
+    // → Kavitha's view: Niranjan is her brother
+    // FROM person is male → reverse is brother
+    // FROM person is female → reverse is sister
+    if (fromUserGender === 'female') return { type: 'sister',  tamil: 'அக்கா/தங்கை'   };
+    return { type: 'brother', tamil: 'அண்ணன்/தம்பி' };
+  }
+
+  if (relation_type === 'spouse') return { type: 'spouse', tamil: 'மனைவி/கணவன்' };
   return { type: relation_type, tamil: relation_type };
 }
 
@@ -238,12 +247,7 @@ router.get('/mine', async (req, res) => {
     }));
 
   const incomingVerified = (incoming || []).map(r => {
-    // relation_type = what FROM user (e.g. Sangeetha) called the TO user (e.g. Mani)
-    // Reverse = what is FROM user to TO user?
-    // To determine son vs daughter: we need FROM user's gender (Sangeetha's gender)
-    // fromUserGender = who added the relation (e.g. Mani's gender — the parent)
-    // toUserGender   = from_user's gender (Sangeetha) — determines son/daughter
-    const reversed = getReverseRelation(r.relation_type, r.from_user?.gender, r.from_user?.gender);
+    const reversed = getReverseRelation(r.relation_type, r.from_user?.gender);
     return { ...r, relation_type: reversed.type, relation_tamil: reversed.tamil };
   });
 
