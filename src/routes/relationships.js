@@ -10,20 +10,20 @@ router.use(authMiddleware);
 // ─────────────────────────────────────────
 // Reverse relation mapping
 // ─────────────────────────────────────────
-function getReverseRelation(relation_type, fromUserGender, toUserGender) {
-  // relation_type = what FROM user says TO user is (e.g. 'father')
-  // fromUserGender = gender of the person who added the relation (e.g. Mani = male)
-  // toUserGender   = gender of the person receiving the reverse (e.g. Sangeetha = female)
+function getReverseRelation(relation_type, fromUserGender, childGender) {
+  // fromUserGender = gender of person who added the relation
+  // childGender    = gender of the person whose reverse label we are computing
 
   if (relation_type === 'son' || relation_type === 'daughter') {
-    // Parent added child → child's reverse is father/mother based on parent's gender
+    // Parent added child → reverse is father/mother based on parent's gender
     if (fromUserGender === 'female') return { type: 'mother', tamil: 'அம்மா' };
     return { type: 'father', tamil: 'அப்பா' };
   }
 
   if (relation_type === 'father' || relation_type === 'mother') {
-    // Child added parent → parent's reverse is son/daughter based on CHILD's gender
-    if (toUserGender === 'female') return { type: 'daughter', tamil: 'மகள்' };
+    // Child added parent → reverse is son/daughter based on CHILD's gender
+    // childGender here = from_user's gender (the child who added the parent)
+    if (childGender === 'female') return { type: 'daughter', tamil: 'மகள்' };
     return { type: 'son', tamil: 'மகன்' };
   }
 
@@ -238,8 +238,12 @@ router.get('/mine', async (req, res) => {
     }));
 
   const incomingVerified = (incoming || []).map(r => {
-    // Pass both fromUser gender AND currentUser (toUser) gender for correct son/daughter resolution
-    const reversed = getReverseRelation(r.relation_type, r.from_user?.gender, currentUser?.gender);
+    // relation_type = what FROM user (e.g. Sangeetha) called the TO user (e.g. Mani)
+    // Reverse = what is FROM user to TO user?
+    // To determine son vs daughter: we need FROM user's gender (Sangeetha's gender)
+    // fromUserGender = who added the relation (e.g. Mani's gender — the parent)
+    // toUserGender   = from_user's gender (Sangeetha) — determines son/daughter
+    const reversed = getReverseRelation(r.relation_type, r.from_user?.gender, r.from_user?.gender);
     return { ...r, relation_type: reversed.type, relation_tamil: reversed.tamil };
   });
 
