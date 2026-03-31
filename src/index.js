@@ -9,7 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.json({ service: 'PingMyFamily API', status: 'running', version: '2.3.0' });
+  res.json({ service: 'PingMyFamily API', status: 'running', version: '2.4.0' });
 });
 
 app.use('/api/auth',          require('./routes/auth'));
@@ -21,7 +21,9 @@ app.use('/api/locations',     require('./routes/locations'));
 app.use('/api/birthdays',     require('./routes/birthdays'));
 app.use('/api/quiz',          require('./routes/quiz'));
 app.use('/api/telegram',      require('./routes/telegram'));
-app.use('/api/tree-invite',   require('./routes/treeinvite'));  // NEW
+app.use('/api/tree-invite',   require('./routes/treeinvite'));
+app.use('/api/kuthams',       require('./routes/kuthams'));
+app.use('/api/admin',         require('./routes/admin'));
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
