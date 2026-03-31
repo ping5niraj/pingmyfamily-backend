@@ -10,16 +10,26 @@ router.use(authMiddleware);
 // ─────────────────────────────────────────
 // Reverse relation mapping
 // ─────────────────────────────────────────
-function getReverseRelation(relation_type, fromUserGender) {
+function getReverseRelation(relation_type, fromUserGender, toUserGender) {
+  // relation_type = what FROM user says TO user is (e.g. 'father')
+  // fromUserGender = gender of the person who added the relation (e.g. Mani = male)
+  // toUserGender   = gender of the person receiving the reverse (e.g. Sangeetha = female)
+
   if (relation_type === 'son' || relation_type === 'daughter') {
+    // Parent added child → child's reverse is father/mother based on parent's gender
     if (fromUserGender === 'female') return { type: 'mother', tamil: 'அம்மா' };
     return { type: 'father', tamil: 'அப்பா' };
   }
-  if (relation_type === 'father') return { type: 'son', tamil: 'மகன்' };
-  if (relation_type === 'mother') return { type: 'son', tamil: 'மகன்' };
+
+  if (relation_type === 'father' || relation_type === 'mother') {
+    // Child added parent → parent's reverse is son/daughter based on CHILD's gender
+    if (toUserGender === 'female') return { type: 'daughter', tamil: 'மகள்' };
+    return { type: 'son', tamil: 'மகன்' };
+  }
+
   if (relation_type === 'brother') return { type: 'brother', tamil: 'அண்ணன்/தம்பி' };
-  if (relation_type === 'sister') return { type: 'sister', tamil: 'அக்கா/தங்கை' };
-  if (relation_type === 'spouse') return { type: 'spouse', tamil: 'மனைவி/கணவன்' };
+  if (relation_type === 'sister')  return { type: 'sister',  tamil: 'அக்கா/தங்கை'  };
+  if (relation_type === 'spouse')  return { type: 'spouse',  tamil: 'மனைவி/கணவன்'  };
   return { type: relation_type, tamil: relation_type };
 }
 
@@ -228,7 +238,8 @@ router.get('/mine', async (req, res) => {
     }));
 
   const incomingVerified = (incoming || []).map(r => {
-    const reversed = getReverseRelation(r.relation_type, r.from_user?.gender);
+    // Pass both fromUser gender AND currentUser (toUser) gender for correct son/daughter resolution
+    const reversed = getReverseRelation(r.relation_type, r.from_user?.gender, currentUser?.gender);
     return { ...r, relation_type: reversed.type, relation_tamil: reversed.tamil };
   });
 
@@ -343,9 +354,7 @@ router.get('/tree/:user_id', async (req, res) => {
 
       if (rel.is_offline) {
         // Use name+gender+addedBy as dedup key to avoid showing same person twice
-        // Dedup offline nodes by name+generation (same person added by multiple family members)
-        const nameKey = (rel.offline_name||'').toLowerCase().trim().replace(/\s+/g,'-');
-        const nodeId = `offline-${nameKey}-gen${nextGen}`;
+        const nodeId = `offline-${userId}-${(rel.offline_name||'').toLowerCase().replace(/\s/g,'-')}`;
         if (!nodeMap.has(nodeId)) {
           nodeMap.set(nodeId, {
             id: nodeId,
@@ -427,98 +436,52 @@ function getExtendedLabel(rootToMid, midToTarget) {
   // Extended chain resolution
   const chain = `${rootToMid}→${midToTarget}`;
   const EXTENDED = {
-    // ── Parent → their parent = grandparent of root ──────────
+    // Parent → their parent = grandparent of root
     'father→father':    { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)' },
     'father→mother':    { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
     'mother→father':    { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)' },
     'mother→mother':    { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
 
-    // ── Parent → their grandparent = great-grandparent of root ──
-    'father→grandfather_paternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா (அப்பா பக்கம்)' },
-    'father→grandmother_paternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி (அப்பா பக்கம்)'  },
-    'father→grandfather_maternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா (அம்மா பக்கம்)' },
-    'father→grandmother_maternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி (அம்மா பக்கம்)'  },
-    'mother→grandfather_paternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா (அப்பா பக்கம்)' },
-    'mother→grandmother_paternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி (அப்பா பக்கம்)'  },
-    'mother→grandfather_maternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா (அம்மா பக்கம்)' },
-    'mother→grandmother_maternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி (அம்மா பக்கம்)'  },
+    // Parent → their grandparent = great-grandparent of root
+    'father→grandfather_paternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'father→grandmother_paternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'father→grandfather_maternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'father→grandmother_maternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'mother→grandfather_paternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'mother→grandmother_paternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'mother→grandfather_maternal': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'mother→grandmother_maternal': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
 
-    // ── Grandparent → their parent = great-grandparent of root ──
-    // THIS IS THE KEY FIX: Mani (father) → Nanjappan (Mani's father)
-    // chain = grandfather_paternal→father → should be great_grandfather
-    'grandfather_paternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா'   },
-    'grandfather_paternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி'    },
-    'grandmother_paternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா'   },
-    'grandmother_paternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி'    },
-    'grandfather_maternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா'   },
-    'grandfather_maternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி'    },
-    'grandmother_maternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா'   },
-    'grandmother_maternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி'    },
+    // Grandparent → their parent = great-grandparent of root
+    'grandfather_paternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'grandfather_paternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'grandmother_paternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'grandmother_paternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'grandfather_maternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'grandfather_maternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
+    'grandmother_maternal→father': { type: 'great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
+    'grandmother_maternal→mother': { type: 'great_grandmother', tamil: 'கொள்ளுப்பாட்டி' },
 
-    // ── Grandparent → their grandparent = great-great-grandparent ──
+    // Grandparent → their grandparent = great-great-grandparent of root
     'grandfather_paternal→grandfather_paternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
     'grandfather_paternal→grandmother_paternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
-    'grandfather_paternal→grandfather_maternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'grandfather_paternal→grandmother_maternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
     'grandmother_paternal→grandfather_paternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
     'grandmother_paternal→grandmother_paternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
-    'grandmother_paternal→grandfather_maternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'grandmother_paternal→grandmother_maternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
-    'grandfather_maternal→grandfather_paternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'grandfather_maternal→grandmother_paternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
-    'grandfather_maternal→grandfather_maternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'grandfather_maternal→grandmother_maternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
-    'grandmother_maternal→grandfather_paternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'grandmother_maternal→grandmother_paternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
-    'grandmother_maternal→grandfather_maternal': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'grandmother_maternal→grandmother_maternal': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
 
-    // ── Great-grandparent → their parent = great-great-grandparent ──
-    'great_grandfather→father': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'great_grandfather→mother': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
-    'great_grandmother→father': { type: 'great_great_grandfather', tamil: 'கொள்ளுத்தாத்தா' },
-    'great_grandmother→mother': { type: 'great_great_grandmother', tamil: 'கொள்ளுப்பாட்டி'  },
+    // Children chain
+    'son→son':          { type: 'grandson',      tamil: 'பேரன்'  },
+    'son→daughter':     { type: 'granddaughter', tamil: 'பேத்தி' },
+    'daughter→son':     { type: 'grandson',      tamil: 'பேரன்'  },
+    'daughter→daughter':{ type: 'granddaughter', tamil: 'பேத்தி' },
 
-    // ── Children chain ────────────────────────────────────────
-    'son→son':           { type: 'grandson',      tamil: 'பேரன்'  },
-    'son→daughter':      { type: 'granddaughter', tamil: 'பேத்தி' },
-    'daughter→son':      { type: 'grandson',      tamil: 'பேரன்'  },
-    'daughter→daughter': { type: 'granddaughter', tamil: 'பேத்தி' },
-
-    // ── Uncle / Aunt ──────────────────────────────────────────
-    'father→brother':    { type: 'uncle_paternal', tamil: 'பெரியப்பா/சித்தப்பா' },
-    'father→sister':     { type: 'aunt_paternal',  tamil: 'அத்தை'                },
-    'mother→brother':    { type: 'uncle_maternal', tamil: 'மாமா'                 },
-    'mother→sister':     { type: 'aunt_maternal',  tamil: 'சித்தி'               },
-
-    // ── Spouse chain ──────────────────────────────────────────
-    'spouse→father':     { type: 'father_in_law',  tamil: 'மாமனார்' },
-    'spouse→mother':     { type: 'mother_in_law',  tamil: 'மாமியார்' },
-    'spouse→brother':    { type: 'brother_in_law', tamil: 'மைத்துனன்' },
-    'spouse→sister':     { type: 'sister_in_law',  tamil: 'நாத்தனார்' },
+    // Uncle/Aunt
+    'father→brother':   { type: 'uncle_elder',   tamil: 'பெரியப்பா/சித்தப்பா' },
+    'father→sister':    { type: 'aunt_paternal',  tamil: 'அத்தை'                },
+    'mother→brother':   { type: 'uncle_maternal', tamil: 'மாமா'                 },
+    'mother→sister':    { type: 'aunt_maternal',  tamil: 'சித்தி'               },
   };
 
-  // Fallback: if chain not found, use the direct relation label
-  // but mark it as 'extended' so frontend can style it differently
-  if (EXTENDED[chain]) return EXTENDED[chain];
-  
-  // Try to find by just the midToTarget (direct label)
-  const DIRECT_FALLBACK = {
-    father:               { type: 'father',               tamil: 'அப்பா'           },
-    mother:               { type: 'mother',               tamil: 'அம்மா'           },
-    son:                  { type: 'son',                  tamil: 'மகன்'            },
-    daughter:             { type: 'daughter',             tamil: 'மகள்'            },
-    brother:              { type: 'brother',              tamil: 'அண்ணன்/தம்பி'   },
-    sister:               { type: 'sister',               tamil: 'அக்கா/தங்கை'    },
-    spouse:               { type: 'spouse',               tamil: 'மனைவி/கணவன்'   },
-    grandfather_paternal: { type: 'grandfather_paternal', tamil: 'தாத்தா'         },
-    grandmother_paternal: { type: 'grandmother_paternal', tamil: 'பாட்டி'          },
-    grandfather_maternal: { type: 'grandfather_maternal', tamil: 'தாத்தா'         },
-    grandmother_maternal: { type: 'grandmother_maternal', tamil: 'பாட்டி'          },
-    great_grandfather:    { type: 'great_grandfather',    tamil: 'கொள்ளுத்தாத்தா' },
-    great_grandmother:    { type: 'great_grandmother',    tamil: 'கொள்ளுப்பாட்டி'  },
-  };
-  return DIRECT_FALLBACK[midToTarget] || { type: midToTarget, tamil: midToTarget };
+  return EXTENDED[chain] || { type: midToTarget, tamil: midToTarget };
 }
 
 module.exports = router;
