@@ -776,6 +776,7 @@ function inferRelation(aToB, bToC) {
 // ─────────────────────────────────────────
 // GET /api/relationships/network/:user_id
 // Full network graph — BFS traversal of all connections
+// OUTGOING ONLY — no reverse logic, no derived relations
 // Returns nodes + edges for visualization
 // Max depth: 15 levels, visited set prevents loops
 // ─────────────────────────────────────────
@@ -877,45 +878,6 @@ router.get('/network/:user_id', async (req, res) => {
         }
       }
 
-      // Fetch incoming verified relationships
-      const { data: incoming } = await supabase
-        .from('pmf_relationships')
-        .select(`
-          id, relation_type, relation_tamil, verification_status,
-          from_user:from_user_id(id, name, kutham, gender, profile_photo)
-        `)
-        .eq('to_user_id', userId)
-        .in('verification_status', ['verified', 'pending']);
-
-      for (const rel of (incoming || [])) {
-        if (!rel.from_user) continue;
-        const fromId = rel.from_user.id;
-        const verified = rel.verification_status === 'verified';
-
-        if (!nodeMap.has(fromId)) {
-          nodeMap.set(fromId, {
-            id: fromId,
-            name: rel.from_user.name,
-            kutham: rel.from_user.kutham,
-            gender: rel.from_user.gender,
-            profile_photo: rel.from_user.profile_photo,
-            is_offline: false,
-            is_root: false,
-          });
-        }
-
-        // Compute reverse label for incoming
-        const rev = getReverseRelation(rel.relation_type, rel.from_user.gender);
-        edges.push({
-          from: userId,
-          to: fromId,
-          relation_type: rev.type,
-          relation_tamil: rev.tamil,
-          verified,
-        });
-
-        if (!visited.has(fromId)) queue.push(fromId);
-      }
     }
   }
 
