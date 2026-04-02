@@ -773,4 +773,169 @@ function inferRelation(aToB, bToC) {
 }
 
 
+// ─────────────────────────────────────────
+// GET /api/relationships/network/:user_id
+// Full network graph — BFS traversal of all connections
+// Returns nodes + edges for visualization
+// Max depth: 15 levels, visited set prevents loops
+// ─────────────────────────────────────────
+router.get('/network/:user_id', async (req, res) => {
+  const rootId = req.params.user_id;
+  const visited = new Set();
+  const nodeMap = new Map(); // id → node object
+  const edges   = [];        // { from, to, relation_type, relation_tamil, verified }
+  const queue   = [rootId];  // BFS queue
+  let depth     = 0;
+  const MAX_DEPTH = 15;
+
+  // Fetch root user details
+  const { data: rootUser } = await supabase
+    .from('pmf_users')
+    .select('id, name, kutham, gender, profile_photo, date_of_birth')
+    .eq('id', rootId)
+    .single();
+
+  if (!rootUser) return res.status(404).json({ error: 'User not found' });
+
+  nodeMap.set(rootId, {
+    id: rootId,
+    name: rootUser.name,
+    kutham: rootUser.kutham,
+    gender: rootUser.gender,
+    profile_photo: rootUser.profile_photo,
+    is_root: true,
+    is_offline: false,
+  });
+
+  // BFS — level by level
+  while (queue.length > 0 && depth < MAX_DEPTH) {
+    const levelSize = queue.length;
+    depth++;
+
+    for (let i = 0; i < levelSize; i++) {
+      const userId = queue.shift();
+      if (visited.has(userId)) continue;
+      visited.add(userId);
+
+      // Fetch outgoing verified relationships
+      const { data: outgoing } = await supabase
+        .from('pmf_relationships')
+        .select(`
+          id, relation_type, relation_tamil, verification_status,
+          is_offline, offline_name, offline_gender,
+          to_user:to_user_id(id, name, kutham, gender, profile_photo)
+        `)
+        .eq('from_user_id', userId)
+        .in('verification_status', ['verified', 'pending']);
+
+      for (const rel of (outgoing || [])) {
+        const verified = rel.verification_status === 'verified';
+
+        if (rel.is_offline) {
+          // Offline/deceased node
+          const offlineId = `offline-${rel.id}`;
+          if (!nodeMap.has(offlineId)) {
+            nodeMap.set(offlineId, {
+              id: offlineId,
+              name: rel.offline_name,
+              kutham: null,
+              gender: rel.offline_gender,
+              profile_photo: null,
+              is_offline: true,
+              is_root: false,
+            });
+          }
+          edges.push({
+            from: userId,
+            to: offlineId,
+            relation_type: rel.relation_type,
+            relation_tamil: rel.relation_tamil,
+            verified,
+          });
+        } else if (rel.to_user) {
+          const toId = rel.to_user.id;
+          if (!nodeMap.has(toId)) {
+            nodeMap.set(toId, {
+              id: toId,
+              name: rel.to_user.name,
+              kutham: rel.to_user.kutham,
+              gender: rel.to_user.gender,
+              profile_photo: rel.to_user.profile_photo,
+              is_offline: false,
+              is_root: false,
+            });
+          }
+          edges.push({
+            from: userId,
+            to: toId,
+            relation_type: rel.relation_type,
+            relation_tamil: rel.relation_tamil,
+            verified,
+          });
+          // Add to queue if not visited
+          if (!visited.has(toId)) queue.push(toId);
+        }
+      }
+
+      // Fetch incoming verified relationships
+      const { data: incoming } = await supabase
+        .from('pmf_relationships')
+        .select(`
+          id, relation_type, relation_tamil, verification_status,
+          from_user:from_user_id(id, name, kutham, gender, profile_photo)
+        `)
+        .eq('to_user_id', userId)
+        .in('verification_status', ['verified', 'pending']);
+
+      for (const rel of (incoming || [])) {
+        if (!rel.from_user) continue;
+        const fromId = rel.from_user.id;
+        const verified = rel.verification_status === 'verified';
+
+        if (!nodeMap.has(fromId)) {
+          nodeMap.set(fromId, {
+            id: fromId,
+            name: rel.from_user.name,
+            kutham: rel.from_user.kutham,
+            gender: rel.from_user.gender,
+            profile_photo: rel.from_user.profile_photo,
+            is_offline: false,
+            is_root: false,
+          });
+        }
+
+        // Compute reverse label for incoming
+        const rev = getReverseRelation(rel.relation_type, rel.from_user.gender);
+        edges.push({
+          from: userId,
+          to: fromId,
+          relation_type: rev.type,
+          relation_tamil: rev.tamil,
+          verified,
+        });
+
+        if (!visited.has(fromId)) queue.push(fromId);
+      }
+    }
+  }
+
+  // Deduplicate edges (A→B and B→A may both exist)
+  const edgeSet = new Set();
+  const uniqueEdges = edges.filter(e => {
+    const key1 = `${e.from}-${e.to}-${e.relation_type}`;
+    if (edgeSet.has(key1)) return false;
+    edgeSet.add(key1);
+    return true;
+  });
+
+  return res.json({
+    success: true,
+    root_id: rootId,
+    nodes: Array.from(nodeMap.values()),
+    edges: uniqueEdges,
+    depth_reached: depth,
+  });
+});
+
+
 module.exports = router;
