@@ -1199,4 +1199,37 @@ router.post('/suggestions/accept', async (req, res) => {
 });
 
 
+
+// ─────────────────────────────────────────
+// PUT /api/relationships/:id
+// Change relation type for an existing relationship
+// ─────────────────────────────────────────
+router.put('/:id', async (req, res) => {
+  const { id } = req.params;
+  const { relation_type, relation_tamil } = req.body;
+
+  if (!relation_type) return res.status(400).json({ error: 'relation_type required' });
+
+  // Verify this relationship belongs to the current user
+  const { data: rel } = await supabase
+    .from('pmf_relationships')
+    .select('id, from_user_id, to_user_id')
+    .eq('id', id)
+    .single();
+
+  if (!rel) return res.status(404).json({ error: 'Relationship not found' });
+  if (rel.from_user_id !== req.user.id && rel.to_user_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not authorized to edit this relationship' });
+  }
+
+  const { error } = await supabase
+    .from('pmf_relationships')
+    .update({ relation_type, relation_tamil })
+    .eq('id', id);
+
+  if (error) return res.status(500).json({ error: 'Failed to update' });
+
+  return res.json({ success: true });
+});
+
 module.exports = router;
