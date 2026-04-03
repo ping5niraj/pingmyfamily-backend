@@ -318,9 +318,8 @@ router.post('/reject', async (req, res) => {
 router.get('/tree/:user_id', async (req, res) => {
   const rootId = req.params.user_id;
   const visited = new Set();
-  const nodeMap = new Map();
+  const nodes = [];
 
-  // Gen delta per relation type
   const GEN_DELTA = {
     great_grandfather: 3, great_grandmother: 3,
     grandfather_paternal: 2, grandmother_paternal: 2,
@@ -334,86 +333,67 @@ router.get('/tree/:user_id', async (req, res) => {
     aunt_by_marriage: 0, uncle_by_marriage: 0, cousin: 0,
     son: -1, daughter: -1,
     son_in_law: -1, daughter_in_law: -1,
-    nephew: -1, niece: -1,
-    stepson: -1, stepdaughter: -1,
+    nephew: -1, niece: -1, stepson: -1, stepdaughter: -1,
     grandson: -2, granddaughter: -2,
   };
 
-  // Relations that should trigger recursion (ancestors + descendants only)
-  const RECURSE_TYPES = new Set([
-    'father','mother','son','daughter',
+  const RECURSE = new Set(['father','mother','son','daughter',
     'grandfather_paternal','grandmother_paternal',
     'grandfather_maternal','grandmother_maternal',
-    'great_grandfather','great_grandmother',
-    'grandson','granddaughter',
-  ]);
+    'great_grandfather','great_grandmother','grandson','granddaughter']);
 
-  async function traverse(userId, generation, relationFromRoot) {
+  async function traverse(userId, generation) {
     if (visited.has(userId)) return;
     if (generation > 3 || generation < -2) return;
     visited.add(userId);
 
-    const { data: rels, error } = await supabase
+    const { data: rels } = await supabase
       .from('pmf_relationships')
-      .select(`id, relation_type, relation_tamil, is_offline, offline_name, offline_gender,
-        to_user:to_user_id(id, name, kutham)`)
+      .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id')
       .eq('from_user_id', userId)
       .eq('verification_status', 'verified');
 
-    if (error || !rels) return;
-
-    for (const rel of rels) {
+    for (const rel of (rels || [])) {
       const delta   = GEN_DELTA[rel.relation_type] ?? 0;
       const nextGen = generation + delta;
       if (nextGen > 3 || nextGen < -2) continue;
 
-      const relLabel = getExtendedLabel(relationFromRoot, rel.relation_type);
-
       if (rel.is_offline) {
-        const nodeId = `offline-${userId}-${(rel.offline_name||'').toLowerCase().replace(/\s/g,'-')}`;
-        if (!nodeMap.has(nodeId)) {
-          nodeMap.set(nodeId, {
-            id: nodeId,
-            name: rel.offline_name,
-            kutham: null,
-            relation_type: relLabel.type,
-            relation_tamil: relLabel.tamil,
-            generation: nextGen,
-            is_offline: true,
-            offline_gender: rel.offline_gender,
-            verified: true,
+        const nodeId = `offline-${userId}-${(rel.offline_name||'').replace(/\s/g,'-').toLowerCase()}`;
+        if (!nodes.find(n => n.id === nodeId)) {
+          nodes.push({
+            id: nodeId, name: rel.offline_name, kutham: null,
+            relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+            generation: nextGen, is_offline: true, offline_gender: rel.offline_gender,
           });
         }
-      } else if (rel.to_user && rel.to_user.id !== rootId) {
-        const toId = rel.to_user.id;
-        if (!nodeMap.has(toId)) {
-          nodeMap.set(toId, {
-            id: toId,
-            name: rel.to_user.name,
-            kutham: rel.to_user.kutham,
-            relation_type: relLabel.type,
-            relation_tamil: relLabel.tamil,
-            generation: nextGen,
-            is_offline: false,
-            verified: true,
-          });
+      } else if (rel.to_user_id && rel.to_user_id !== rootId) {
+        if (!nodes.find(n => n.id === rel.to_user_id)) {
+          // Fetch user info
+          const { data: u } = await supabase
+            .from('pmf_users')
+            .select('id, name, kutham')
+            .eq('id', rel.to_user_id)
+            .single();
+          if (u) {
+            nodes.push({
+              id: u.id, name: u.name, kutham: u.kutham,
+              relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+              generation: nextGen, is_offline: false,
+            });
+          }
         }
-        // Recurse into ancestors and descendants
-        if (RECURSE_TYPES.has(rel.relation_type)) {
-          await traverse(toId, nextGen, relLabel.type);
+        if (RECURSE.has(rel.relation_type)) {
+          await traverse(rel.to_user_id, nextGen);
         }
       }
     }
   }
 
-  await traverse(rootId, 0, null);
-
-  return res.json({
-    success: true,
-    nodes: Array.from(nodeMap.values()),
-    root_id: rootId
-  });
+  await traverse(rootId, 0);
+  return res.json({ success: true, nodes, root_id: rootId });
 });
+
 
 // ─────────────────────────────────────────
 // Extended label resolver
