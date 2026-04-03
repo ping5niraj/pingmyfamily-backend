@@ -1008,13 +1008,13 @@ router.get('/network/:user_id', async (req, res) => {
 
 // ─────────────────────────────────────────
 // GET /api/relationships/suggestions
-// After registration — suggest family based on pending invites
-// Returns: list of suggested relations with inferred relation types
+// Suggest family members based on recently verified connections
+// Works for both: newly registered users (via pending invites)
+// AND existing users who just accepted a request
 // ─────────────────────────────────────────
 router.get('/suggestions', async (req, res) => {
   const userId = req.user.id;
 
-  // Get current user's phone and gender
   const { data: currentUser } = await supabase
     .from('pmf_users')
     .select('id, name, phone, gender')
@@ -1023,92 +1023,87 @@ router.get('/suggestions', async (req, res) => {
 
   if (!currentUser) return res.json({ success: true, suggestions: [] });
 
-  const digits = (currentUser.phone || '').replace(/\D/g, '');
+  const suggestions = [];
+  const addedIds = new Set([userId]);
 
-  // Find pending invites for this user's phone
+  // Source 1: pending invites (for newly registered users)
+  const digits = (currentUser.phone || '').replace(/\D/g, '');
   const { data: pendingInvites } = await supabase
     .from('pmf_pending_invites')
     .select('*, from_user:from_user_id(id, name, phone, gender, kutham, profile_photo)')
     .eq('to_phone', digits)
     .eq('status', 'pending');
 
-  if (!pendingInvites || pendingInvites.length === 0) {
-    return res.json({ success: true, suggestions: [] });
+  // Source 2: all verified relationships (for existing users who accepted requests)
+  const { data: myVerified } = await supabase
+    .from('pmf_relationships')
+    .select('id, relation_type, relation_tamil, from_user_id, to_user_id, from_user:from_user_id(id, name, phone, gender, kutham, profile_photo)')
+    .eq('verification_status', 'verified')
+    .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`);
+
+  // Build list of connected users and their relation to me
+  const connectedUsers = [];
+
+  // From verified relationships
+  for (const rel of (myVerified || [])) {
+    let connectedId, connectedUser, myRelationType;
+    if (rel.from_user_id === userId) {
+      connectedId = rel.to_user_id;
+      myRelationType = rel.relation_type;
+    } else {
+      connectedId = rel.from_user_id;
+      connectedUser = rel.from_user;
+      const rev = getReverseRelation(rel.relation_type, rel.from_user?.gender);
+      myRelationType = rev.type;
+    }
+    if (!connectedId || addedIds.has(connectedId)) continue;
+    addedIds.add(connectedId);
+
+    if (!connectedUser) {
+      const { data: u } = await supabase.from('pmf_users').select('id, name, phone, gender, kutham, profile_photo').eq('id', connectedId).single();
+      connectedUser = u;
+    }
+    if (connectedUser) connectedUsers.push({ user: connectedUser, myRelationType });
   }
 
-  const suggestions = [];
-
-  for (const invite of pendingInvites) {
+  // From pending invites
+  for (const invite of (pendingInvites || [])) {
     const inviter = invite.from_user;
-    if (!inviter) continue;
+    if (!inviter || addedIds.has(inviter.id)) continue;
+    addedIds.add(inviter.id);
+    const rev = getReverseRelation(invite.relation_type, inviter.gender);
+    connectedUsers.push({ user: inviter, myRelationType: rev.type });
+  }
 
-    // Direct suggestion: the inviter themselves
-    // e.g. Mani invited Niranjan as 'son' → Mani is Niranjan's 'father'
-    const directRel = getReverseRelation(invite.relation_type, inviter.gender);
-
-    suggestions.push({
-      suggested_user: {
-        id: inviter.id,
-        name: inviter.name,
-        phone: inviter.phone,
-        kutham: inviter.kutham,
-        profile_photo: inviter.profile_photo,
-      },
-      suggested_relation_type: directRel.type,
-      suggested_relation_tamil: directRel.tamil,
-      confidence: 'high', // direct invite
-      invite_id: invite.id,
-    });
-
-    // Now fetch inviter's verified relations and infer extended suggestions
-    const { data: inviterRels } = await supabase
+  // For each connected user, fetch THEIR verified relations and infer mine
+  for (const { user: connUser, myRelationType } of connectedUsers) {
+    const { data: theirRels } = await supabase
       .from('pmf_relationships')
-      .select(`
-        id, relation_type, relation_tamil,
-        is_offline, offline_name, offline_gender,
-        to_user:to_user_id(id, name, phone, gender, kutham, profile_photo)
-      `)
-      .eq('from_user_id', inviter.id)
+      .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id, to_user:to_user_id(id, name, phone, kutham, profile_photo)')
+      .eq('from_user_id', connUser.id)
       .eq('verification_status', 'verified');
 
-    for (const rel of (inviterRels || [])) {
-      // Skip if this is pointing back to current user
+    for (const rel of (theirRels || [])) {
+      const targetId = rel.is_offline ? `offline-${rel.id}` : rel.to_user?.id;
+      if (!targetId || addedIds.has(targetId)) continue;
       if (rel.to_user?.id === userId) continue;
 
-      // Infer: what is this person to the NEW user?
-      // e.g. Mani (father of Niranjan) → Savithiri (Mani's spouse) → Niranjan's mother
-      const inferredRel = inferRelation(directRel.type, rel.relation_type);
+      const inferredRel = inferRelation(myRelationType, rel.relation_type);
       if (!inferredRel || !inferredRel.type) continue;
 
-      // Skip if already in suggestions
-      const personId = rel.is_offline
-        ? `offline-${rel.id}`
-        : rel.to_user?.id;
-      if (!personId) continue;
-      if (suggestions.find(s => s.suggested_user?.id === personId)) continue;
-
+      addedIds.add(targetId);
       suggestions.push({
         suggested_user: rel.is_offline ? {
-          id: personId,
-          name: rel.offline_name,
-          phone: null,
-          kutham: null,
-          profile_photo: null,
-          is_offline: true,
-          offline_gender: rel.offline_gender,
+          id: targetId, name: rel.offline_name, phone: null, kutham: null,
+          profile_photo: null, is_offline: true, offline_gender: rel.offline_gender,
         } : {
-          id: rel.to_user.id,
-          name: rel.to_user.name,
-          phone: rel.to_user.phone,
-          kutham: rel.to_user.kutham,
-          profile_photo: rel.to_user.profile_photo,
-          is_offline: false,
+          id: rel.to_user.id, name: rel.to_user.name, phone: rel.to_user.phone,
+          kutham: rel.to_user.kutham, profile_photo: rel.to_user.profile_photo, is_offline: false,
         },
         suggested_relation_type: inferredRel.type,
         suggested_relation_tamil: inferredRel.tamil,
-        confidence: 'medium', // inferred
-        via: inviter.name, // "via Mani N"
-        invite_id: null,
+        confidence: 'medium',
+        via: connUser.name,
       });
     }
   }
