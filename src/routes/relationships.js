@@ -349,6 +349,13 @@ router.get('/tree/:user_id', async (req, res) => {
                      : isGrandchild  ? -2
                      : isParent      ? 1
                      : isChild       ? -1
+                     : ['father_in_law','mother_in_law','uncle_paternal','uncle_maternal',
+                        'uncle_elder','uncle_younger','aunt_paternal','aunt_maternal',
+                        'aunt_by_marriage','uncle_by_marriage'].includes(rel.relation_type) ? 1
+                     : ['son_in_law','daughter_in_law','nephew','niece',
+                        'nephew_by_marriage','niece_by_marriage',
+                        'stepson','stepdaughter'].includes(rel.relation_type) ? -1
+                     : ['grandson','granddaughter'].includes(rel.relation_type) ? -2
                      : 0;
 
       const nextGen = generation + genDelta;
@@ -397,9 +404,9 @@ router.get('/tree/:user_id', async (req, res) => {
         if (isAncestor || isDescendant) {
           await traverse(rel.to_user.id, nextGen, relLabel.type, relLabel.tamil);
         }
-        // Also recurse into grandparent nodes to find their parents
-        // This allows 3rd/4th generation to appear correctly
-        else if (isGrandparent || isGrandchild) {
+        // Also recurse into grandparent and in-law nodes to find their parents
+        else if (isGrandparent || isGrandchild ||
+                 ['father_in_law','mother_in_law'].includes(rel.relation_type)) {
           await traverse(rel.to_user.id, nextGen, relLabel.type, relLabel.tamil);
         }
       }
