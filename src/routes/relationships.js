@@ -439,12 +439,10 @@ router.get('/tree/:user_id', async (req, res) => {
     }
   }
 
-  // Step 2: Recurse into direct ancestors/descendants to get gen 2, 3
+  // Step 2: Recurse into ALL gen-1 nodes to get gen 2, 3
+  // This includes mother, father, in-laws — so their parents (gen 2) appear
   for (const [userId, baseGen] of directGenMap) {
-    if (!RECURSE.has(
-      nodeMap.get(userId)?.relation_type
-    )) continue;
-    if (Math.abs(baseGen) < 1) continue; // only recurse into ancestors/descendants
+    if (Math.abs(baseGen) < 1) continue; // only recurse into non-current gen
 
     const { data: subRels } = await supabase
       .from('pmf_relationships')
@@ -471,6 +469,46 @@ router.get('/tree/:user_id', async (req, res) => {
         visited.add(rel.to_user_id);
         const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.to_user_id).single();
         if (u && !nodeMap.has(u.id)) {
+          nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
+            relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+            generation: nextGen, is_offline: false });
+        }
+      }
+    }
+  }
+
+  // Step 3: Recurse one more level — for nodes found in Step 2 (gen 2, gen -2)
+  // This catches grandparents' parents (gen 3) if needed
+  // Also catches Savithiri's parents via Mani → Savithiri → her parents
+  const step2Nodes = Array.from(nodeMap.values()).filter(n => Math.abs(n.generation) >= 1 && !n.is_offline);
+  for (const node of step2Nodes) {
+    if (visited.has(`step2-${node.id}`)) continue;
+    visited.add(`step2-${node.id}`);
+
+    const { data: subRels } = await supabase
+      .from('pmf_relationships')
+      .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id')
+      .eq('from_user_id', node.id)
+      .eq('verification_status', 'verified');
+
+    for (const rel of (subRels || [])) {
+      const delta   = GEN_DELTA[rel.relation_type] ?? 0;
+      const nextGen = node.generation + delta;
+      if (nextGen < -2 || nextGen > 3) continue;
+      if (nextGen === 0) continue; // don't add current gen peers
+
+      if (rel.is_offline) {
+        const nodeId = `offline-${node.id}-${(rel.offline_name||'').replace(/\s/g,'-').toLowerCase()}`;
+        if (!nodeMap.has(nodeId)) {
+          nodeMap.set(nodeId, {
+            id: nodeId, name: rel.offline_name, kutham: null,
+            relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+            generation: nextGen, is_offline: true, offline_gender: rel.offline_gender,
+          });
+        }
+      } else if (rel.to_user_id && rel.to_user_id !== rootId && !nodeMap.has(rel.to_user_id)) {
+        const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.to_user_id).single();
+        if (u) {
           nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
             relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
             generation: nextGen, is_offline: false });
@@ -965,6 +1003,161 @@ router.get('/network/:user_id', async (req, res) => {
     edges: uniqueEdges,
     depth_reached: depth,
   });
+});
+
+
+// ─────────────────────────────────────────
+// GET /api/relationships/suggestions
+// After registration — suggest family based on pending invites
+// Returns: list of suggested relations with inferred relation types
+// ─────────────────────────────────────────
+router.get('/suggestions', async (req, res) => {
+  const userId = req.user.id;
+
+  // Get current user's phone and gender
+  const { data: currentUser } = await supabase
+    .from('pmf_users')
+    .select('id, name, phone, gender')
+    .eq('id', userId)
+    .single();
+
+  if (!currentUser) return res.json({ success: true, suggestions: [] });
+
+  const digits = (currentUser.phone || '').replace(/\D/g, '');
+
+  // Find pending invites for this user's phone
+  const { data: pendingInvites } = await supabase
+    .from('pmf_pending_invites')
+    .select('*, from_user:from_user_id(id, name, phone, gender, kutham, profile_photo)')
+    .eq('to_phone', digits)
+    .eq('status', 'pending');
+
+  if (!pendingInvites || pendingInvites.length === 0) {
+    return res.json({ success: true, suggestions: [] });
+  }
+
+  const suggestions = [];
+
+  for (const invite of pendingInvites) {
+    const inviter = invite.from_user;
+    if (!inviter) continue;
+
+    // Direct suggestion: the inviter themselves
+    // e.g. Mani invited Niranjan as 'son' → Mani is Niranjan's 'father'
+    const directRel = getReverseRelation(invite.relation_type, inviter.gender);
+
+    suggestions.push({
+      suggested_user: {
+        id: inviter.id,
+        name: inviter.name,
+        phone: inviter.phone,
+        kutham: inviter.kutham,
+        profile_photo: inviter.profile_photo,
+      },
+      suggested_relation_type: directRel.type,
+      suggested_relation_tamil: directRel.tamil,
+      confidence: 'high', // direct invite
+      invite_id: invite.id,
+    });
+
+    // Now fetch inviter's verified relations and infer extended suggestions
+    const { data: inviterRels } = await supabase
+      .from('pmf_relationships')
+      .select(`
+        id, relation_type, relation_tamil,
+        is_offline, offline_name, offline_gender,
+        to_user:to_user_id(id, name, phone, gender, kutham, profile_photo)
+      `)
+      .eq('from_user_id', inviter.id)
+      .eq('verification_status', 'verified');
+
+    for (const rel of (inviterRels || [])) {
+      // Skip if this is pointing back to current user
+      if (rel.to_user?.id === userId) continue;
+
+      // Infer: what is this person to the NEW user?
+      // e.g. Mani (father of Niranjan) → Savithiri (Mani's spouse) → Niranjan's mother
+      const inferredRel = inferRelation(directRel.type, rel.relation_type);
+      if (!inferredRel || !inferredRel.type) continue;
+
+      // Skip if already in suggestions
+      const personId = rel.is_offline
+        ? `offline-${rel.id}`
+        : rel.to_user?.id;
+      if (!personId) continue;
+      if (suggestions.find(s => s.suggested_user?.id === personId)) continue;
+
+      suggestions.push({
+        suggested_user: rel.is_offline ? {
+          id: personId,
+          name: rel.offline_name,
+          phone: null,
+          kutham: null,
+          profile_photo: null,
+          is_offline: true,
+          offline_gender: rel.offline_gender,
+        } : {
+          id: rel.to_user.id,
+          name: rel.to_user.name,
+          phone: rel.to_user.phone,
+          kutham: rel.to_user.kutham,
+          profile_photo: rel.to_user.profile_photo,
+          is_offline: false,
+        },
+        suggested_relation_type: inferredRel.type,
+        suggested_relation_tamil: inferredRel.tamil,
+        confidence: 'medium', // inferred
+        via: inviter.name, // "via Mani N"
+        invite_id: null,
+      });
+    }
+  }
+
+  return res.json({ success: true, suggestions });
+});
+
+// ─────────────────────────────────────────
+// POST /api/relationships/suggestions/accept
+// Accept a suggestion — creates verified relationship
+// Body: { suggested_user_id, relation_type, relation_tamil, is_offline, offline_name, offline_gender }
+// ─────────────────────────────────────────
+router.post('/suggestions/accept', async (req, res) => {
+  const userId = req.user.id;
+  const { suggested_user_id, relation_type, relation_tamil, is_offline, offline_name, offline_gender } = req.body;
+
+  if (is_offline) {
+    await supabase.from('pmf_relationships').insert({
+      from_user_id: userId,
+      relation_type, relation_tamil,
+      verification_status: 'verified',
+      is_offline: true,
+      offline_name, offline_gender,
+      created_by: userId,
+    });
+    return res.json({ success: true });
+  }
+
+  if (!suggested_user_id) return res.status(400).json({ error: 'suggested_user_id required' });
+
+  // Check not already connected
+  const { data: existing } = await supabase
+    .from('pmf_relationships')
+    .select('id')
+    .or(`and(from_user_id.eq.${userId},to_user_id.eq.${suggested_user_id}),and(from_user_id.eq.${suggested_user_id},to_user_id.eq.${userId})`)
+    .single();
+
+  if (existing) return res.json({ success: true, already_exists: true });
+
+  await supabase.from('pmf_relationships').insert({
+    from_user_id: userId,
+    to_user_id: suggested_user_id,
+    relation_type, relation_tamil,
+    verification_status: 'verified',
+    created_by: userId,
+    is_offline: false,
+  });
+
+  return res.json({ success: true });
 });
 
 
