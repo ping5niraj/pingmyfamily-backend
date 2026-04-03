@@ -477,13 +477,14 @@ router.get('/tree/:user_id', async (req, res) => {
     }
   }
 
-  // Step 3: Recurse one more level — for nodes found in Step 2 (gen 2, gen -2)
-  // This catches grandparents' parents (gen 3) if needed
-  // Also catches Savithiri's parents via Mani → Savithiri → her parents
-  const step2Nodes = Array.from(nodeMap.values()).filter(n => Math.abs(n.generation) >= 1 && !n.is_offline);
+  // Step 3: Recurse one more level for gen-1 nodes to find gen-2 nodes
+  // Use nodeMap.has() to prevent duplicates — single source of truth
+  const step2Nodes = Array.from(nodeMap.values()).filter(n => 
+    Math.abs(n.generation) === 1 && !n.is_offline
+  );
   for (const node of step2Nodes) {
-    if (visited.has(`step2-${node.id}`)) continue;
-    visited.add(`step2-${node.id}`);
+    if (visited.has(node.id)) continue; // already traversed
+    visited.add(node.id);
 
     const { data: subRels } = await supabase
       .from('pmf_relationships')
@@ -495,7 +496,7 @@ router.get('/tree/:user_id', async (req, res) => {
       const delta   = GEN_DELTA[rel.relation_type] ?? 0;
       const nextGen = node.generation + delta;
       if (nextGen < -2 || nextGen > 3) continue;
-      if (nextGen === 0) continue; // don't add current gen peers
+      if (nextGen === 0) continue; // skip current gen
 
       if (rel.is_offline) {
         const nodeId = `offline-${node.id}-${(rel.offline_name||'').replace(/\s/g,'-').toLowerCase()}`;
@@ -1005,231 +1006,5 @@ router.get('/network/:user_id', async (req, res) => {
   });
 });
 
-
-// ─────────────────────────────────────────
-// GET /api/relationships/suggestions
-// Suggest family members based on recently verified connections
-// Works for both: newly registered users (via pending invites)
-// AND existing users who just accepted a request
-// ─────────────────────────────────────────
-router.get('/suggestions', async (req, res) => {
-  const userId = req.user.id;
-
-  const { data: currentUser } = await supabase
-    .from('pmf_users')
-    .select('id, name, phone, gender')
-    .eq('id', userId)
-    .single();
-
-  if (!currentUser) return res.json({ success: true, suggestions: [] });
-
-  const suggestions = [];
-  const addedIds = new Set([userId]);
-
-  // Source 1: pending invites (for newly registered users)
-  const digits = (currentUser.phone || '').replace(/\D/g, '');
-  const { data: pendingInvites } = await supabase
-    .from('pmf_pending_invites')
-    .select('*, from_user:from_user_id(id, name, phone, gender, kutham, profile_photo)')
-    .eq('to_phone', digits)
-    .eq('status', 'pending');
-
-  // Source 2: all verified relationships (for existing users who accepted requests)
-  const { data: myVerified } = await supabase
-    .from('pmf_relationships')
-    .select('id, relation_type, relation_tamil, from_user_id, to_user_id, from_user:from_user_id(id, name, phone, gender, kutham, profile_photo)')
-    .eq('verification_status', 'verified')
-    .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`);
-
-  // Build list of connected users and their relation to me
-  const connectedUsers = [];
-
-  // From verified relationships
-  for (const rel of (myVerified || [])) {
-    let connectedId, connectedUser, myRelationType;
-    if (rel.from_user_id === userId) {
-      connectedId = rel.to_user_id;
-      myRelationType = rel.relation_type;
-    } else {
-      connectedId = rel.from_user_id;
-      connectedUser = rel.from_user;
-      const rev = getReverseRelation(rel.relation_type, rel.from_user?.gender);
-      myRelationType = rev.type;
-    }
-    if (!connectedId || addedIds.has(connectedId)) continue;
-    addedIds.add(connectedId);
-
-    if (!connectedUser) {
-      const { data: u } = await supabase.from('pmf_users').select('id, name, phone, gender, kutham, profile_photo').eq('id', connectedId).single();
-      connectedUser = u;
-    }
-    if (connectedUser) connectedUsers.push({ user: connectedUser, myRelationType });
-  }
-
-  // From pending invites
-  for (const invite of (pendingInvites || [])) {
-    const inviter = invite.from_user;
-    if (!inviter || addedIds.has(inviter.id)) continue;
-    addedIds.add(inviter.id);
-    const rev = getReverseRelation(invite.relation_type, inviter.gender);
-    connectedUsers.push({ user: inviter, myRelationType: rev.type });
-  }
-
-  // For each connected user, fetch THEIR verified relations and infer mine
-  for (const { user: connUser, myRelationType } of connectedUsers) {
-    // Fetch P1's OUTGOING verified relationships
-    const { data: theirOut } = await supabase
-      .from('pmf_relationships')
-      .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id, to_user:to_user_id(id, name, phone, kutham, profile_photo)')
-      .eq('from_user_id', connUser.id)
-      .eq('verification_status', 'verified');
-
-    // Fetch P1's INCOMING verified relationships (people who added P1)
-    const { data: theirIn } = await supabase
-      .from('pmf_relationships')
-      .select('id, relation_type, relation_tamil, from_user_id, from_user:from_user_id(id, name, phone, gender, kutham, profile_photo)')
-      .eq('to_user_id', connUser.id)
-      .eq('verification_status', 'verified')
-      .eq('is_offline', false);
-
-    // Combine both — normalize to same shape
-    const theirAllRels = [];
-
-    for (const rel of (theirOut || [])) {
-      theirAllRels.push({
-        relation_type: rel.relation_type,
-        relation_tamil: rel.relation_tamil,
-        is_offline: rel.is_offline,
-        offline_name: rel.offline_name,
-        offline_gender: rel.offline_gender,
-        targetId: rel.is_offline ? `offline-${rel.id}` : rel.to_user?.id,
-        targetUser: rel.to_user,
-        direction: 'outgoing',
-      });
-    }
-
-    for (const rel of (theirIn || [])) {
-      if (!rel.from_user || rel.from_user_id === userId) continue;
-      // Reverse the relation type — if Mani added Kavitha as 'daughter',
-      // from Kavitha's perspective Mani is 'father'
-      const rev = getReverseRelation(rel.relation_type, rel.from_user?.gender);
-      theirAllRels.push({
-        relation_type: rev.type,
-        relation_tamil: rev.tamil,
-        is_offline: false,
-        offline_name: null,
-        offline_gender: null,
-        targetId: rel.from_user_id,
-        targetUser: rel.from_user,
-        direction: 'incoming',
-      });
-    }
-
-    // Now infer P2's relation to each of P1's family members
-    for (const rel of theirAllRels) {
-      const { targetId, targetUser, relation_type, is_offline, offline_name, offline_gender } = rel;
-      if (!targetId || addedIds.has(targetId)) continue;
-      if (targetUser?.id === userId) continue;
-
-      const inferredRel = inferRelation(myRelationType, relation_type);
-      if (!inferredRel || !inferredRel.type) continue;
-
-      addedIds.add(targetId);
-      suggestions.push({
-        suggested_user: is_offline ? {
-          id: targetId, name: offline_name, phone: null, kutham: null,
-          profile_photo: null, is_offline: true, offline_gender,
-        } : {
-          id: targetUser?.id, name: targetUser?.name, phone: targetUser?.phone,
-          kutham: targetUser?.kutham, profile_photo: targetUser?.profile_photo, is_offline: false,
-        },
-        suggested_relation_type: inferredRel.type,
-        suggested_relation_tamil: inferredRel.tamil,
-        confidence: 'medium',
-        via: connUser.name,
-      });
-    }
-  }
-
-  return res.json({ success: true, suggestions });
-});
-
-// ─────────────────────────────────────────
-// POST /api/relationships/suggestions/accept
-// Accept a suggestion — creates verified relationship
-// Body: { suggested_user_id, relation_type, relation_tamil, is_offline, offline_name, offline_gender }
-// ─────────────────────────────────────────
-router.post('/suggestions/accept', async (req, res) => {
-  const userId = req.user.id;
-  const { suggested_user_id, relation_type, relation_tamil, is_offline, offline_name, offline_gender } = req.body;
-
-  if (is_offline) {
-    await supabase.from('pmf_relationships').insert({
-      from_user_id: userId,
-      relation_type, relation_tamil,
-      verification_status: 'verified',
-      is_offline: true,
-      offline_name, offline_gender,
-      created_by: userId,
-    });
-    return res.json({ success: true });
-  }
-
-  if (!suggested_user_id) return res.status(400).json({ error: 'suggested_user_id required' });
-
-  // Check not already connected
-  const { data: existing } = await supabase
-    .from('pmf_relationships')
-    .select('id')
-    .or(`and(from_user_id.eq.${userId},to_user_id.eq.${suggested_user_id}),and(from_user_id.eq.${suggested_user_id},to_user_id.eq.${userId})`)
-    .single();
-
-  if (existing) return res.json({ success: true, already_exists: true });
-
-  await supabase.from('pmf_relationships').insert({
-    from_user_id: userId,
-    to_user_id: suggested_user_id,
-    relation_type, relation_tamil,
-    verification_status: 'verified',
-    created_by: userId,
-    is_offline: false,
-  });
-
-  return res.json({ success: true });
-});
-
-
-
-// ─────────────────────────────────────────
-// PUT /api/relationships/:id
-// Change relation type for an existing relationship
-// ─────────────────────────────────────────
-router.put('/:id', async (req, res) => {
-  const { id } = req.params;
-  const { relation_type, relation_tamil } = req.body;
-
-  if (!relation_type) return res.status(400).json({ error: 'relation_type required' });
-
-  // Verify this relationship belongs to the current user
-  const { data: rel } = await supabase
-    .from('pmf_relationships')
-    .select('id, from_user_id, to_user_id')
-    .eq('id', id)
-    .single();
-
-  if (!rel) return res.status(404).json({ error: 'Relationship not found' });
-  if (rel.from_user_id !== req.user.id && rel.to_user_id !== req.user.id) {
-    return res.status(403).json({ error: 'Not authorized to edit this relationship' });
-  }
-
-  const { error } = await supabase
-    .from('pmf_relationships')
-    .update({ relation_type, relation_tamil })
-    .eq('id', id);
-
-  if (error) return res.status(500).json({ error: 'Failed to update' });
-
-  return res.json({ success: true });
-});
 
 module.exports = router;
