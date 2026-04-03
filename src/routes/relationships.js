@@ -318,57 +318,58 @@ router.post('/reject', async (req, res) => {
 router.get('/tree/:user_id', async (req, res) => {
   const rootId = req.params.user_id;
   const visited = new Set();
-  const nodeMap = new Map(); // key = unique id, value = node
+  const nodeMap = new Map();
 
-  async function traverse(userId, generation, relationFromRoot, relationTamilFromRoot) {
+  // Gen delta per relation type
+  const GEN_DELTA = {
+    great_grandfather: 3, great_grandmother: 3,
+    grandfather_paternal: 2, grandmother_paternal: 2,
+    grandfather_maternal: 2, grandmother_maternal: 2,
+    father: 1, mother: 1,
+    father_in_law: 1, mother_in_law: 1,
+    uncle_paternal: 1, uncle_maternal: 1, uncle_elder: 1, uncle_younger: 1,
+    aunt_paternal: 1, aunt_maternal: 1,
+    brother: 0, sister: 0, spouse: 0,
+    brother_in_law: 0, sister_in_law: 0, co_brother: 0,
+    aunt_by_marriage: 0, uncle_by_marriage: 0, cousin: 0,
+    son: -1, daughter: -1,
+    son_in_law: -1, daughter_in_law: -1,
+    nephew: -1, niece: -1,
+    stepson: -1, stepdaughter: -1,
+    grandson: -2, granddaughter: -2,
+  };
+
+  // Relations that should trigger recursion (ancestors + descendants only)
+  const RECURSE_TYPES = new Set([
+    'father','mother','son','daughter',
+    'grandfather_paternal','grandmother_paternal',
+    'grandfather_maternal','grandmother_maternal',
+    'great_grandfather','great_grandmother',
+    'grandson','granddaughter',
+  ]);
+
+  async function traverse(userId, generation, relationFromRoot) {
     if (visited.has(userId)) return;
     if (generation > 3 || generation < -2) return;
     visited.add(userId);
 
-    // Fetch all verified relationships where this user is the FROM side
-    const { data: rels } = await supabase
+    const { data: rels, error } = await supabase
       .from('pmf_relationships')
-      .select(`id, relation_type, relation_tamil, verification_status,
-        is_offline, offline_name, offline_gender,
-        to_user:to_user_id(id, name, phone, kutham, gender)`)
+      .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id')
       .eq('from_user_id', userId)
       .eq('verification_status', 'verified');
 
-    for (const rel of rels || []) {
-      const isGrandparent = rel.relation_type.startsWith('grandfather') ||
-                            rel.relation_type.startsWith('grandmother');
-      const isGrandchild  = rel.relation_type === 'grandson' ||
-                            rel.relation_type === 'granddaughter';
-      const isParent      = rel.relation_type === 'father' || rel.relation_type === 'mother';
-      const isChild       = rel.relation_type === 'son' || rel.relation_type === 'daughter';
-      const isAncestor    = isParent || isGrandparent;
-      const isDescendant  = isChild || isGrandchild;
+    if (error || !rels) return;
 
-      // Generation delta from current node
-      const genDelta = isGrandparent ? 2
-                     : isGrandchild  ? -2
-                     : isParent      ? 1
-                     : isChild       ? -1
-                     : ['father_in_law','mother_in_law','uncle_paternal','uncle_maternal',
-                        'uncle_elder','uncle_younger','aunt_paternal','aunt_maternal',
-                        'aunt_by_marriage','uncle_by_marriage'].includes(rel.relation_type) ? 1
-                     : ['son_in_law','daughter_in_law','nephew','niece',
-                        'nephew_by_marriage','niece_by_marriage',
-                        'stepson','stepdaughter'].includes(rel.relation_type) ? -1
-                     : ['grandson','granddaughter'].includes(rel.relation_type) ? -2
-                     : 0;
-
-      const nextGen = generation + genDelta;
-
+    // Fetch to_user details separately for non-offline
+    for (const rel of rels) {
+      const delta  = GEN_DELTA[rel.relation_type] ?? 0;
+      const nextGen = generation + delta;
       if (nextGen > 3 || nextGen < -2) continue;
 
-      // Determine relation label relative to ROOT user
-      // e.g. if Mani is father of Niranjan, and Mani adds his father →
-      // that person is grandfather of Niranjan
       const relLabel = getExtendedLabel(relationFromRoot, rel.relation_type);
 
       if (rel.is_offline) {
-        // Use name+gender+addedBy as dedup key to avoid showing same person twice
         const nodeId = `offline-${userId}-${(rel.offline_name||'').toLowerCase().replace(/\s/g,'-')}`;
         if (!nodeMap.has(nodeId)) {
           nodeMap.set(nodeId, {
@@ -381,39 +382,40 @@ router.get('/tree/:user_id', async (req, res) => {
             is_offline: true,
             offline_gender: rel.offline_gender,
             verified: true,
-            added_by: userId
           });
         }
-      } else if (rel.to_user && rel.to_user.id !== rootId) {
-        const nodeId = rel.to_user.id;
-        if (!nodeMap.has(nodeId)) {
-          nodeMap.set(nodeId, {
-            id: nodeId,
-            name: rel.to_user.name,
-            kutham: rel.to_user.kutham,
-            relation_type: relLabel.type,
-            relation_tamil: relLabel.tamil,
-            generation: nextGen,
-            is_offline: false,
-            verified: true,
-            added_by: userId
-          });
+      } else if (rel.to_user_id && rel.to_user_id !== rootId) {
+        // Fetch user details
+        if (!nodeMap.has(rel.to_user_id)) {
+          const { data: toUser } = await supabase
+            .from('pmf_users')
+            .select('id, name, kutham')
+            .eq('id', rel.to_user_id)
+            .single();
+
+          if (toUser) {
+            nodeMap.set(toUser.id, {
+              id: toUser.id,
+              name: toUser.name,
+              kutham: toUser.kutham,
+              relation_type: relLabel.type,
+              relation_tamil: relLabel.tamil,
+              generation: nextGen,
+              is_offline: false,
+              verified: true,
+            });
+          }
         }
 
-        // Recurse up/down the chain for all ancestor/descendant relations
-        if (isAncestor || isDescendant) {
-          await traverse(rel.to_user.id, nextGen, relLabel.type, relLabel.tamil);
-        }
-        // Also recurse into grandparent and in-law nodes to find their parents
-        else if (isGrandparent || isGrandchild ||
-                 ['father_in_law','mother_in_law'].includes(rel.relation_type)) {
-          await traverse(rel.to_user.id, nextGen, relLabel.type, relLabel.tamil);
+        // Recurse into ancestors and descendants
+        if (RECURSE_TYPES.has(rel.relation_type)) {
+          await traverse(rel.to_user_id, nextGen, relLabel.type);
         }
       }
     }
   }
 
-  await traverse(rootId, 0, null, null);
+  await traverse(rootId, 0, null);
 
   return res.json({
     success: true,
