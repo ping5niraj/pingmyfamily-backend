@@ -1077,28 +1077,71 @@ router.get('/suggestions', async (req, res) => {
 
   // For each connected user, fetch THEIR verified relations and infer mine
   for (const { user: connUser, myRelationType } of connectedUsers) {
-    const { data: theirRels } = await supabase
+    // Fetch P1's OUTGOING verified relationships
+    const { data: theirOut } = await supabase
       .from('pmf_relationships')
       .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id, to_user:to_user_id(id, name, phone, kutham, profile_photo)')
       .eq('from_user_id', connUser.id)
       .eq('verification_status', 'verified');
 
-    for (const rel of (theirRels || [])) {
-      const targetId = rel.is_offline ? `offline-${rel.id}` : rel.to_user?.id;
-      if (!targetId || addedIds.has(targetId)) continue;
-      if (rel.to_user?.id === userId) continue;
+    // Fetch P1's INCOMING verified relationships (people who added P1)
+    const { data: theirIn } = await supabase
+      .from('pmf_relationships')
+      .select('id, relation_type, relation_tamil, from_user_id, from_user:from_user_id(id, name, phone, gender, kutham, profile_photo)')
+      .eq('to_user_id', connUser.id)
+      .eq('verification_status', 'verified')
+      .eq('is_offline', false);
 
-      const inferredRel = inferRelation(myRelationType, rel.relation_type);
+    // Combine both — normalize to same shape
+    const theirAllRels = [];
+
+    for (const rel of (theirOut || [])) {
+      theirAllRels.push({
+        relation_type: rel.relation_type,
+        relation_tamil: rel.relation_tamil,
+        is_offline: rel.is_offline,
+        offline_name: rel.offline_name,
+        offline_gender: rel.offline_gender,
+        targetId: rel.is_offline ? `offline-${rel.id}` : rel.to_user?.id,
+        targetUser: rel.to_user,
+        direction: 'outgoing',
+      });
+    }
+
+    for (const rel of (theirIn || [])) {
+      if (!rel.from_user || rel.from_user_id === userId) continue;
+      // Reverse the relation type — if Mani added Kavitha as 'daughter',
+      // from Kavitha's perspective Mani is 'father'
+      const rev = getReverseRelation(rel.relation_type, rel.from_user?.gender);
+      theirAllRels.push({
+        relation_type: rev.type,
+        relation_tamil: rev.tamil,
+        is_offline: false,
+        offline_name: null,
+        offline_gender: null,
+        targetId: rel.from_user_id,
+        targetUser: rel.from_user,
+        direction: 'incoming',
+      });
+    }
+
+    // Now infer P2's relation to each of P1's family members
+    for (const rel of theirAllRels) {
+      const { targetId, targetUser, relation_type, is_offline, offline_name, offline_gender } = rel;
+      if (!targetId || addedIds.has(targetId)) continue;
+      if (targetUser?.id === userId) continue;
+
+      const inferredRel = inferRelation(myRelationType, relation_type);
       if (!inferredRel || !inferredRel.type) continue;
 
       addedIds.add(targetId);
       suggestions.push({
-        suggested_user: rel.is_offline ? {
-          id: targetId, name: rel.offline_name, phone: null, kutham: null,
-          profile_photo: null, is_offline: true, offline_gender: rel.offline_gender,
+        suggested_user: is_offline ? {
+          id: targetId, name: offline_name, phone: null, kutham: null,
+          profile_photo: null, is_offline: true, offline_gender,
         } : {
-          id: rel.to_user.id, name: rel.to_user.name, phone: rel.to_user.phone,
-          kutham: rel.to_user.kutham, profile_photo: rel.to_user.profile_photo, is_offline: false,
+          id: targetUser?.id, name: targetUser?.name, phone: targetUser?.phone,
+          kutham: targetUser?.kutham, profile_photo: targetUser?.profile_photo, is_offline: false,
         },
         suggested_relation_type: inferredRel.type,
         suggested_relation_tamil: inferredRel.tamil,
