@@ -317,124 +317,169 @@ router.post('/reject', async (req, res) => {
 // ─────────────────────────────────────────
 router.get('/tree/:user_id', async (req, res) => {
   const rootId = req.params.user_id;
-  const visited = new Set();
-  const nodes = [];
 
-  const GEN_DELTA = {
+  // Generation from ROOT's perspective for each relation type
+  const GEN_FROM_ROOT = {
+    // Root's direct relations
     great_grandfather: 3, great_grandmother: 3,
     grandfather_paternal: 2, grandmother_paternal: 2,
     grandfather_maternal: 2, grandmother_maternal: 2,
     father: 1, mother: 1,
     father_in_law: 1, mother_in_law: 1,
     uncle_paternal: 1, uncle_maternal: 1, uncle_elder: 1, uncle_younger: 1,
-    aunt_paternal: 1, aunt_maternal: 1,
+    aunt_paternal: 1, aunt_maternal: 1, aunt_by_marriage: 1,
     brother: 0, sister: 0, spouse: 0,
-    brother_in_law: 0, sister_in_law: 0, co_brother: 0,
-    aunt_by_marriage: 0, uncle_by_marriage: 0, cousin: 0,
+    brother_in_law: 0, sister_in_law: 0, co_brother: 0, cousin: 0,
     son: -1, daughter: -1,
     son_in_law: -1, daughter_in_law: -1,
     nephew: -1, niece: -1, stepson: -1, stepdaughter: -1,
     grandson: -2, granddaughter: -2,
   };
 
+  // For nodes reached through intermediaries (gen offset from intermediary)
+  const GEN_DELTA = {
+    father: 1, mother: 1,
+    grandfather_paternal: 2, grandmother_paternal: 2,
+    grandfather_maternal: 2, grandmother_maternal: 2,
+    great_grandfather: 3, great_grandmother: 3,
+    son: -1, daughter: -1,
+    grandson: -2, granddaughter: -2,
+    spouse: 0, brother: 0, sister: 0,
+    father_in_law: 1, mother_in_law: 1,
+    brother_in_law: 0, sister_in_law: 0,
+    son_in_law: -1, daughter_in_law: -1,
+    nephew: -1, niece: -1,
+    uncle_paternal: 1, aunt_paternal: 1,
+    uncle_maternal: 1, aunt_maternal: 1,
+  };
+
   const RECURSE = new Set(['father','mother','son','daughter',
     'grandfather_paternal','grandmother_paternal',
     'grandfather_maternal','grandmother_maternal',
-    'great_grandfather','great_grandmother','grandson','granddaughter']);
+    'great_grandfather','great_grandmother',
+    'grandson','granddaughter']);
 
-  // Helper to add a user node
-  async function addUserNode(userId, relType, relTamil, generation) {
-    if (nodes.find(n => n.id === userId)) return;
-    const { data: u } = await supabase
-      .from('pmf_users').select('id, name, kutham')
-      .eq('id', userId).single();
-    if (u) nodes.push({
-      id: u.id, name: u.name, kutham: u.kutham,
-      relation_type: relType, relation_tamil: relTamil,
-      generation, is_offline: false,
-    });
+  // nodeMap: id → {id, name, kutham, relation_type, relation_tamil, generation, is_offline}
+  const nodeMap = new Map();
+  const visited = new Set([rootId]); // root is always visited, never added as node
+
+  // Step 1: Get ALL root's direct relationships (both outgoing and incoming)
+  const { data: directOut } = await supabase
+    .from('pmf_relationships')
+    .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id')
+    .eq('from_user_id', rootId)
+    .eq('verification_status', 'verified');
+
+  const { data: directIn } = await supabase
+    .from('pmf_relationships')
+    .select('id, relation_type, relation_tamil, from_user_id')
+    .eq('to_user_id', rootId)
+    .eq('verification_status', 'verified')
+    .eq('is_offline', false);
+
+  // Map of userId → generation for direct relations
+  const directGenMap = new Map();
+
+  // Process outgoing direct relations
+  for (const rel of (directOut || [])) {
+    const gen = GEN_FROM_ROOT[rel.relation_type] ?? 0;
+    if (gen < -2 || gen > 3) continue;
+
+    if (rel.is_offline) {
+      const nodeId = `offline-root-${(rel.offline_name||'').replace(/\s/g,'-').toLowerCase()}`;
+      nodeMap.set(nodeId, {
+        id: nodeId, name: rel.offline_name, kutham: null,
+        relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+        generation: gen, is_offline: true, offline_gender: rel.offline_gender,
+      });
+    } else if (rel.to_user_id) {
+      directGenMap.set(rel.to_user_id, gen);
+      if (!nodeMap.has(rel.to_user_id)) {
+        const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.to_user_id).single();
+        if (u) nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
+          relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+          generation: gen, is_offline: false });
+      }
+      visited.add(rel.to_user_id);
+    }
   }
 
-  // Reverse relation type for incoming relationships
-  function reverseType(relType) {
-    const REV = {
-      father: 'son', mother: 'son',
-      son: 'father', daughter: 'father',
-      brother: 'brother', sister: 'sister',
-      spouse: 'spouse',
-      grandfather_paternal: 'grandson', grandmother_paternal: 'grandson',
-      grandfather_maternal: 'grandson', grandmother_maternal: 'grandson',
-      grandson: 'grandfather_paternal', granddaughter: 'grandfather_paternal',
-      uncle_paternal: 'nephew', aunt_paternal: 'niece',
-      uncle_maternal: 'nephew', aunt_maternal: 'niece',
-      nephew: 'uncle_paternal', niece: 'aunt_paternal',
-      father_in_law: 'son_in_law', mother_in_law: 'son_in_law',
-      son_in_law: 'father_in_law', daughter_in_law: 'father_in_law',
-      brother_in_law: 'brother_in_law', sister_in_law: 'sister_in_law',
-    };
-    return REV[relType] || relType;
+  // Process incoming direct relations (others added root)
+  // e.g. Mani added Niranjan as 'son' → Mani is Niranjan's 'father' (gen+1)
+  const REV_TYPE = {
+    son: 'father', daughter: 'mother',
+    father: 'son', mother: 'daughter',
+    brother: 'brother', sister: 'sister', spouse: 'spouse',
+    grandson: 'grandfather_paternal', granddaughter: 'grandmother_paternal',
+    grandfather_paternal: 'grandson', grandmother_paternal: 'granddaughter',
+    grandfather_maternal: 'grandson', grandmother_maternal: 'granddaughter',
+    nephew: 'uncle_paternal', niece: 'aunt_paternal',
+    uncle_paternal: 'nephew', aunt_paternal: 'niece',
+    uncle_maternal: 'nephew', aunt_maternal: 'niece',
+    father_in_law: 'son_in_law', mother_in_law: 'daughter_in_law',
+    son_in_law: 'father_in_law', daughter_in_law: 'mother_in_law',
+    brother_in_law: 'brother_in_law', sister_in_law: 'sister_in_law',
+  };
+
+  for (const rel of (directIn || [])) {
+    if (!rel.from_user_id) continue;
+    const revType = REV_TYPE[rel.relation_type] || rel.relation_type;
+    const gen = GEN_FROM_ROOT[revType] ?? 0;
+    if (gen < -2 || gen > 3) continue;
+
+    if (!directGenMap.has(rel.from_user_id)) {
+      directGenMap.set(rel.from_user_id, gen);
+    }
+    if (!nodeMap.has(rel.from_user_id)) {
+      const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.from_user_id).single();
+      if (u) nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
+        relation_type: revType, relation_tamil: rel.relation_tamil,
+        generation: gen, is_offline: false });
+      visited.add(rel.from_user_id);
+    }
   }
 
-  async function traverse(userId, generation) {
-    if (visited.has(userId)) return;
-    if (generation > 3 || generation < -2) return;
-    visited.add(userId);
+  // Step 2: Recurse into direct ancestors/descendants to get gen 2, 3
+  for (const [userId, baseGen] of directGenMap) {
+    if (!RECURSE.has(
+      nodeMap.get(userId)?.relation_type
+    )) continue;
+    if (Math.abs(baseGen) < 1) continue; // only recurse into ancestors/descendants
 
-    // Query OUTGOING relationships (this user added others)
-    const { data: outgoing } = await supabase
+    const { data: subRels } = await supabase
       .from('pmf_relationships')
       .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id')
       .eq('from_user_id', userId)
       .eq('verification_status', 'verified');
 
-    for (const rel of (outgoing || [])) {
-      const delta   = GEN_DELTA[rel.relation_type] ?? 0;
-      const nextGen = generation + delta;
-      if (nextGen > 3 || nextGen < -2) continue;
+    for (const rel of (subRels || [])) {
+      const delta  = GEN_DELTA[rel.relation_type] ?? 0;
+      const nextGen = baseGen + delta;
+      if (nextGen < -2 || nextGen > 3) continue;
+      if (nextGen === 0) continue; // skip current gen via traversal (avoid re-adding root's peers)
 
       if (rel.is_offline) {
         const nodeId = `offline-${userId}-${(rel.offline_name||'').replace(/\s/g,'-').toLowerCase()}`;
-        if (!nodes.find(n => n.id === nodeId)) {
-          nodes.push({
+        if (!nodeMap.has(nodeId)) {
+          nodeMap.set(nodeId, {
             id: nodeId, name: rel.offline_name, kutham: null,
             relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
             generation: nextGen, is_offline: true, offline_gender: rel.offline_gender,
           });
         }
-      } else if (rel.to_user_id && rel.to_user_id !== rootId) {
-        await addUserNode(rel.to_user_id, rel.relation_type, rel.relation_tamil, nextGen);
-        if (RECURSE.has(rel.relation_type)) {
-          await traverse(rel.to_user_id, nextGen);
+      } else if (rel.to_user_id && !visited.has(rel.to_user_id)) {
+        visited.add(rel.to_user_id);
+        const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.to_user_id).single();
+        if (u && !nodeMap.has(u.id)) {
+          nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
+            relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+            generation: nextGen, is_offline: false });
         }
-      }
-    }
-
-    // Query INCOMING relationships (others added this user)
-    // e.g. Mani added Niranjan as son — so from Niranjan's perspective, Mani is father
-    const { data: incoming } = await supabase
-      .from('pmf_relationships')
-      .select('id, relation_type, relation_tamil, from_user_id')
-      .eq('to_user_id', userId)
-      .eq('verification_status', 'verified')
-      .eq('is_offline', false);
-
-    for (const rel of (incoming || [])) {
-      if (!rel.from_user_id || rel.from_user_id === rootId) continue;
-      // Reverse the relation type to get this person's relation TO userId
-      const revType  = reverseType(rel.relation_type);
-      const delta    = GEN_DELTA[revType] ?? 0;
-      const nextGen  = generation + delta;
-      if (nextGen > 3 || nextGen < -2) continue;
-
-      await addUserNode(rel.from_user_id, revType, rel.relation_tamil, nextGen);
-      if (RECURSE.has(revType)) {
-        await traverse(rel.from_user_id, nextGen);
       }
     }
   }
 
-  await traverse(rootId, 0);
-  return res.json({ success: true, nodes, root_id: rootId });
+  return res.json({ success: true, nodes: Array.from(nodeMap.values()), root_id: rootId });
 });
 
 
