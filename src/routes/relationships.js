@@ -322,7 +322,7 @@ router.get('/tree/:user_id', async (req, res) => {
 
   async function traverse(userId, generation, relationFromRoot, relationTamilFromRoot) {
     if (visited.has(userId)) return;
-    if (generation > 4 || generation < -2) return;
+    if (generation > 3 || generation < -2) return;
     visited.add(userId);
 
     // Fetch all verified relationships where this user is the FROM side
@@ -353,7 +353,7 @@ router.get('/tree/:user_id', async (req, res) => {
 
       const nextGen = generation + genDelta;
 
-      if (nextGen > 4 || nextGen < -2) continue;
+      if (nextGen > 3 || nextGen < -2) continue;
 
       // Determine relation label relative to ROOT user
       // e.g. if Mani is father of Niranjan, and Mani adds his father →
