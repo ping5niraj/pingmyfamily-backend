@@ -355,15 +355,15 @@ router.get('/tree/:user_id', async (req, res) => {
 
     const { data: rels, error } = await supabase
       .from('pmf_relationships')
-      .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id')
+      .select(`id, relation_type, relation_tamil, is_offline, offline_name, offline_gender,
+        to_user:to_user_id(id, name, kutham)`)
       .eq('from_user_id', userId)
       .eq('verification_status', 'verified');
 
     if (error || !rels) return;
 
-    // Fetch to_user details separately for non-offline
     for (const rel of rels) {
-      const delta  = GEN_DELTA[rel.relation_type] ?? 0;
+      const delta   = GEN_DELTA[rel.relation_type] ?? 0;
       const nextGen = generation + delta;
       if (nextGen > 3 || nextGen < -2) continue;
 
@@ -384,32 +384,23 @@ router.get('/tree/:user_id', async (req, res) => {
             verified: true,
           });
         }
-      } else if (rel.to_user_id && rel.to_user_id !== rootId) {
-        // Fetch user details
-        if (!nodeMap.has(rel.to_user_id)) {
-          const { data: toUser } = await supabase
-            .from('pmf_users')
-            .select('id, name, kutham')
-            .eq('id', rel.to_user_id)
-            .single();
-
-          if (toUser) {
-            nodeMap.set(toUser.id, {
-              id: toUser.id,
-              name: toUser.name,
-              kutham: toUser.kutham,
-              relation_type: relLabel.type,
-              relation_tamil: relLabel.tamil,
-              generation: nextGen,
-              is_offline: false,
-              verified: true,
-            });
-          }
+      } else if (rel.to_user && rel.to_user.id !== rootId) {
+        const toId = rel.to_user.id;
+        if (!nodeMap.has(toId)) {
+          nodeMap.set(toId, {
+            id: toId,
+            name: rel.to_user.name,
+            kutham: rel.to_user.kutham,
+            relation_type: relLabel.type,
+            relation_tamil: relLabel.tamil,
+            generation: nextGen,
+            is_offline: false,
+            verified: true,
+          });
         }
-
         // Recurse into ancestors and descendants
         if (RECURSE_TYPES.has(rel.relation_type)) {
-          await traverse(rel.to_user_id, nextGen, relLabel.type);
+          await traverse(toId, nextGen, relLabel.type);
         }
       }
     }
