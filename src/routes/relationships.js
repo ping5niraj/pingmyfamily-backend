@@ -342,18 +342,52 @@ router.get('/tree/:user_id', async (req, res) => {
     'grandfather_maternal','grandmother_maternal',
     'great_grandfather','great_grandmother','grandson','granddaughter']);
 
+  // Helper to add a user node
+  async function addUserNode(userId, relType, relTamil, generation) {
+    if (nodes.find(n => n.id === userId)) return;
+    const { data: u } = await supabase
+      .from('pmf_users').select('id, name, kutham')
+      .eq('id', userId).single();
+    if (u) nodes.push({
+      id: u.id, name: u.name, kutham: u.kutham,
+      relation_type: relType, relation_tamil: relTamil,
+      generation, is_offline: false,
+    });
+  }
+
+  // Reverse relation type for incoming relationships
+  function reverseType(relType) {
+    const REV = {
+      father: 'son', mother: 'son',
+      son: 'father', daughter: 'father',
+      brother: 'brother', sister: 'sister',
+      spouse: 'spouse',
+      grandfather_paternal: 'grandson', grandmother_paternal: 'grandson',
+      grandfather_maternal: 'grandson', grandmother_maternal: 'grandson',
+      grandson: 'grandfather_paternal', granddaughter: 'grandfather_paternal',
+      uncle_paternal: 'nephew', aunt_paternal: 'niece',
+      uncle_maternal: 'nephew', aunt_maternal: 'niece',
+      nephew: 'uncle_paternal', niece: 'aunt_paternal',
+      father_in_law: 'son_in_law', mother_in_law: 'son_in_law',
+      son_in_law: 'father_in_law', daughter_in_law: 'father_in_law',
+      brother_in_law: 'brother_in_law', sister_in_law: 'sister_in_law',
+    };
+    return REV[relType] || relType;
+  }
+
   async function traverse(userId, generation) {
     if (visited.has(userId)) return;
     if (generation > 3 || generation < -2) return;
     visited.add(userId);
 
-    const { data: rels } = await supabase
+    // Query OUTGOING relationships (this user added others)
+    const { data: outgoing } = await supabase
       .from('pmf_relationships')
       .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id')
       .eq('from_user_id', userId)
       .eq('verification_status', 'verified');
 
-    for (const rel of (rels || [])) {
+    for (const rel of (outgoing || [])) {
       const delta   = GEN_DELTA[rel.relation_type] ?? 0;
       const nextGen = generation + delta;
       if (nextGen > 3 || nextGen < -2) continue;
@@ -368,24 +402,33 @@ router.get('/tree/:user_id', async (req, res) => {
           });
         }
       } else if (rel.to_user_id && rel.to_user_id !== rootId) {
-        if (!nodes.find(n => n.id === rel.to_user_id)) {
-          // Fetch user info
-          const { data: u } = await supabase
-            .from('pmf_users')
-            .select('id, name, kutham')
-            .eq('id', rel.to_user_id)
-            .single();
-          if (u) {
-            nodes.push({
-              id: u.id, name: u.name, kutham: u.kutham,
-              relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
-              generation: nextGen, is_offline: false,
-            });
-          }
-        }
+        await addUserNode(rel.to_user_id, rel.relation_type, rel.relation_tamil, nextGen);
         if (RECURSE.has(rel.relation_type)) {
           await traverse(rel.to_user_id, nextGen);
         }
+      }
+    }
+
+    // Query INCOMING relationships (others added this user)
+    // e.g. Mani added Niranjan as son — so from Niranjan's perspective, Mani is father
+    const { data: incoming } = await supabase
+      .from('pmf_relationships')
+      .select('id, relation_type, relation_tamil, from_user_id')
+      .eq('to_user_id', userId)
+      .eq('verification_status', 'verified')
+      .eq('is_offline', false);
+
+    for (const rel of (incoming || [])) {
+      if (!rel.from_user_id || rel.from_user_id === rootId) continue;
+      // Reverse the relation type to get this person's relation TO userId
+      const revType  = reverseType(rel.relation_type);
+      const delta    = GEN_DELTA[revType] ?? 0;
+      const nextGen  = generation + delta;
+      if (nextGen > 3 || nextGen < -2) continue;
+
+      await addUserNode(rel.from_user_id, revType, rel.relation_tamil, nextGen);
+      if (RECURSE.has(revType)) {
+        await traverse(rel.from_user_id, nextGen);
       }
     }
   }
