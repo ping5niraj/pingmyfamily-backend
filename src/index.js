@@ -4,7 +4,7 @@ const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const { router: suggestionsRouter } = require('./routes/suggestions');
+const suggestionsRouter = require('./routes/suggestions');
 
 app.use(cors());
 app.use(express.json());

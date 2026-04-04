@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 const supabase = require('../supabase');
 const admin = require('firebase-admin');
+const { generateSuggestionsForUser } = require('../services/suggestionEngine');
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -110,6 +111,12 @@ router.post('/firebase-verify', async (req, res) => {
         { id: existingUser.id, phone: existingUser.phone },
         process.env.JWT_SECRET, { expiresIn: '30d' }
       );
+
+      // Trigger suggestion scan on every login — non-blocking
+      generateSuggestionsForUser(existingUser.id).catch(e =>
+        console.error('[Suggestions] Login scan error:', e.message)
+      );
+
       return res.json({
         success: true, isNewUser: false, token,
         user: { id: existingUser.id, name: existingUser.name, phone: existingUser.phone, gender: existingUser.gender, profile_photo: existingUser.profile_photo }
@@ -146,6 +153,12 @@ router.post('/login', async (req, res) => {
   if (!valid) return res.status(401).json({ error: 'தவறான கடவுச்சொல் / Wrong password' });
 
   const token = jwt.sign({ id: user.id, phone: user.phone }, process.env.JWT_SECRET, { expiresIn: '30d' });
+
+  // Trigger suggestion scan on every login — non-blocking
+  generateSuggestionsForUser(user.id).catch(e =>
+    console.error('[Suggestions] Login scan error:', e.message)
+  );
+
   return res.json({
     success: true, token,
     user: { id: user.id, name: user.name, phone: user.phone, gender: user.gender, profile_photo: user.profile_photo }
@@ -264,6 +277,12 @@ router.post('/verify-otp', async (req, res) => {
 
   if (existingUser) {
     const token = jwt.sign({ id: existingUser.id, phone: existingUser.phone }, process.env.JWT_SECRET, { expiresIn: '30d' });
+
+    // Trigger suggestion scan — non-blocking
+    generateSuggestionsForUser(existingUser.id).catch(e =>
+      console.error('[Suggestions] OTP login scan error:', e.message)
+    );
+
     return res.json({ success: true, isNewUser: false, token, user: { id: existingUser.id, name: existingUser.name, phone: existingUser.phone, gender: existingUser.gender, profile_photo: existingUser.profile_photo } });
   }
 

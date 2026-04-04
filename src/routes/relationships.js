@@ -4,7 +4,7 @@ const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const authMiddleware = require('../middleware/auth');
 const { sendEmail, sendTelegram } = require('../services/notifications');
-const { generateSuggestionsForUser } = require('./suggestions');
+const { generateSuggestionsForUser } = require('../services/suggestionEngine');
 
 router.use(authMiddleware);
 
