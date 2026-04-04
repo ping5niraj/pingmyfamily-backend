@@ -47,6 +47,32 @@ const INFER = {
   'daughter→spouse':             { type: 'son_in_law',           tamil: 'மருமகன்'                 },
   'brother→spouse':              { type: 'sister_in_law',        tamil: 'நாத்தனார்/மைத்துனி'     },
   'sister→spouse':               { type: 'brother_in_law',       tamil: 'மைத்துனன்'              },
+
+  // Child's grandparent = grandparent (child stored grandparent as outgoing)
+  'daughter→grandmother_maternal': { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
+  'daughter→grandfather_maternal': { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)' },
+  'daughter→grandmother_paternal': { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
+  'daughter→grandfather_paternal': { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)' },
+  'son→grandmother_maternal':      { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
+  'son→grandfather_maternal':      { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)' },
+  'son→grandmother_paternal':      { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
+  'son→grandfather_paternal':      { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)' },
+
+  // Niece/nephew's parent = sibling or sibling-in-law
+  'niece→mother':    { type: 'sister',        tamil: 'அக்கா/தங்கை'   },
+  'niece→father':    { type: 'brother_in_law',tamil: 'மைத்துனன்'     },
+  'nephew→father':   { type: 'brother',       tamil: 'அண்ணன்/தம்பி' },
+  'nephew→mother':   { type: 'sister_in_law', tamil: 'நாத்தனார்'     },
+
+  // Grandchild's parent = child
+  'grandson→father':    { type: 'son',      tamil: 'மகன்'  },
+  'grandson→mother':    { type: 'daughter', tamil: 'மகள்'  },
+  'granddaughter→father': { type: 'son',    tamil: 'மகன்'  },
+  'granddaughter→mother': { type: 'daughter',tamil: 'மகள்' },
+
+  // Cousin's parent = uncle/aunt
+  'cousin→father': { type: 'uncle_paternal', tamil: 'பெரியப்பா/சித்தப்பா' },
+  'cousin→mother': { type: 'aunt_paternal',  tamil: 'அத்தை'                },
 };
 
 const REV_TYPE = {
@@ -104,14 +130,15 @@ async function generateSuggestionsForUser(userId) {
   const suggestionsToInsert = [];
 
   for (const [knownUserId, myRelToThem] of myRelMap) {
-    const { data: theirRels } = await supabase
+    // Check outgoing relations of known user (knownUser → target)
+    const { data: theirOutRels } = await supabase
       .from('pmf_relationships')
-      .select('id, relation_type, to_user_id, from_user_id')
+      .select('id, relation_type, to_user_id')
       .eq('from_user_id', knownUserId)
       .eq('verification_status', 'verified')
       .eq('is_offline', false);
 
-    for (const theirRel of (theirRels || [])) {
+    for (const theirRel of (theirOutRels || [])) {
       const targetUserId = theirRel.to_user_id;
       if (!targetUserId) continue;
       if (targetUserId === userId) continue;
@@ -138,7 +165,49 @@ async function generateSuggestionsForUser(userId) {
         via_relation: myRelToThem.type,
         status: 'pending',
       });
+      existingSet.add(dedupeKey);
+    }
 
+    // Also check incoming relations of known user (target → knownUser)
+    // e.g. Srijanani → Savithiri (grandmother_maternal)
+    // Kavitha knows Srijanani as daughter → chain: daughter→grandmother_maternal
+    const { data: theirInRels } = await supabase
+      .from('pmf_relationships')
+      .select('id, relation_type, from_user_id')
+      .eq('to_user_id', knownUserId)
+      .eq('verification_status', 'verified')
+      .eq('is_offline', false);
+
+    for (const theirRel of (theirInRels || [])) {
+      const targetUserId = theirRel.from_user_id;
+      if (!targetUserId) continue;
+      if (targetUserId === userId) continue;
+      if (myRelMap.has(targetUserId)) continue;
+
+      // theirRel.relation_type is what TARGET calls knownUser
+      // reverse it to get what knownUser calls target
+      const knownToTarget = REV_TYPE[theirRel.relation_type] || theirRel.relation_type;
+      const chainKey = `${myRelToThem.type}→${knownToTarget}`;
+      const inferred = INFER[chainKey];
+      if (!inferred) continue;
+
+      const dedupeKey = `${targetUserId}:${inferred.type}`;
+      if (existingSet.has(dedupeKey)) continue;
+
+      const { data: targetUser } = await supabase
+        .from('pmf_users').select('id, name').eq('id', targetUserId).single();
+      if (!targetUser) continue;
+
+      suggestionsToInsert.push({
+        for_user_id: userId,
+        suggested_user_id: targetUserId,
+        suggested_name: targetUser.name,
+        relation_type: inferred.type,
+        relation_tamil: inferred.tamil,
+        via_user_id: knownUserId,
+        via_relation: myRelToThem.type,
+        status: 'pending',
+      });
       existingSet.add(dedupeKey);
     }
   }
