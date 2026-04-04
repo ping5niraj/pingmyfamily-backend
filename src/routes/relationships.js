@@ -555,23 +555,37 @@ router.get('/tree/:user_id', async (req, res) => {
 // returns the correct label for root→target
 // ─────────────────────────────────────────
 function getExtendedLabel(rootToMid, midToTarget) {
-  // Direct relation (root is the from_user)
+  const DIRECT = {
+    father:               { type: 'father',               tamil: 'அப்பா'                    },
+    mother:               { type: 'mother',               tamil: 'அம்மா'                    },
+    son:                  { type: 'son',                  tamil: 'மகன்'                     },
+    daughter:             { type: 'daughter',             tamil: 'மகள்'                     },
+    brother:              { type: 'brother',              tamil: 'அண்ணன்/தம்பி'            },
+    sister:               { type: 'sister',               tamil: 'அக்கா/தங்கை'             },
+    spouse:               { type: 'spouse',               tamil: 'மனைவி/கணவன்'             },
+    grandfather_paternal: { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)'  },
+    grandmother_paternal: { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
+    grandfather_maternal: { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)'  },
+    grandmother_maternal: { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
+    grandson:             { type: 'grandson',             tamil: 'பேரன்'                    },
+    granddaughter:        { type: 'granddaughter',        tamil: 'பேத்தி'                   },
+    nephew:               { type: 'nephew',               tamil: 'மருமகன்'                  },
+    niece:                { type: 'niece',                tamil: 'மருமகள்'                  },
+    uncle_paternal:       { type: 'uncle_paternal',       tamil: 'பெரியப்பா/சித்தப்பா'     },
+    uncle_maternal:       { type: 'uncle_maternal',       tamil: 'மாமா'                     },
+    aunt_paternal:        { type: 'aunt_paternal',        tamil: 'அத்தை'                    },
+    aunt_maternal:        { type: 'aunt_maternal',        tamil: 'சித்தி'                   },
+    son_in_law:           { type: 'son_in_law',           tamil: 'மருமகன்'                  },
+    daughter_in_law:      { type: 'daughter_in_law',      tamil: 'மருமகள்'                  },
+    father_in_law:        { type: 'father_in_law',        tamil: 'மாமனார்'                  },
+    mother_in_law:        { type: 'mother_in_law',        tamil: 'மாமியார்'                 },
+    brother_in_law:       { type: 'brother_in_law',       tamil: 'மைத்துனன்'               },
+    sister_in_law:        { type: 'sister_in_law',        tamil: 'நாத்தனார்'                },
+    cousin:               { type: 'cousin',               tamil: 'உறவினர்'                  },
+  };
+
+  // Direct relation (root is the from_user) — no intermediary
   if (!rootToMid) {
-    const DIRECT = {
-      father:               { type: 'father',               tamil: 'அப்பா'                    },
-      mother:               { type: 'mother',               tamil: 'அம்மா'                    },
-      son:                  { type: 'son',                  tamil: 'மகன்'                     },
-      daughter:             { type: 'daughter',             tamil: 'மகள்'                     },
-      brother:              { type: 'brother',              tamil: 'அண்ணன்/தம்பி'            },
-      sister:               { type: 'sister',               tamil: 'அக்கா/தங்கை'             },
-      spouse:               { type: 'spouse',               tamil: 'மனைவி/கணவன்'             },
-      grandfather_paternal: { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)'  },
-      grandmother_paternal: { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
-      grandfather_maternal: { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)'  },
-      grandmother_maternal: { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
-      grandson:             { type: 'grandson',             tamil: 'பேரன்'                    },
-      granddaughter:        { type: 'granddaughter',        tamil: 'பேத்தி'                   },
-    };
     return DIRECT[midToTarget] || { type: midToTarget, tamil: midToTarget };
   }
 
@@ -616,14 +630,48 @@ function getExtendedLabel(rootToMid, midToTarget) {
     'daughter→son':     { type: 'grandson',      tamil: 'பேரன்'  },
     'daughter→daughter':{ type: 'granddaughter', tamil: 'பேத்தி' },
 
+    // Child's nephew/niece = grandchild (niece/nephew stored from child's sibling perspective)
+    'son→nephew':       { type: 'grandson',      tamil: 'பேரன்'  },
+    'son→niece':        { type: 'granddaughter', tamil: 'பேத்தி' },
+    'daughter→nephew':  { type: 'grandson',      tamil: 'பேரன்'  },
+    'daughter→niece':   { type: 'granddaughter', tamil: 'பேத்தி' },
+
+    // Child's spouse = son/daughter in law
+    'son→spouse':       { type: 'daughter_in_law', tamil: 'மருமகள்' },
+    'daughter→spouse':  { type: 'son_in_law',      tamil: 'மருமகன்' },
+
+    // Child's grandparent relations (stored outgoing from child)
+    'son→grandmother_maternal':      { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
+    'son→grandfather_maternal':      { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)' },
+    'son→grandmother_paternal':      { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
+    'son→grandfather_paternal':      { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)' },
+    'daughter→grandmother_maternal': { type: 'grandmother_maternal', tamil: 'பாட்டி (அம்மா பக்கம்)'  },
+    'daughter→grandfather_maternal': { type: 'grandfather_maternal', tamil: 'தாத்தா (அம்மா பக்கம்)' },
+    'daughter→grandmother_paternal': { type: 'grandmother_paternal', tamil: 'பாட்டி (அப்பா பக்கம்)'  },
+    'daughter→grandfather_paternal': { type: 'grandfather_paternal', tamil: 'தாத்தா (அப்பா பக்கம்)' },
+
     // Uncle/Aunt
     'father→brother':   { type: 'uncle_elder',   tamil: 'பெரியப்பா/சித்தப்பா' },
     'father→sister':    { type: 'aunt_paternal',  tamil: 'அத்தை'                },
     'mother→brother':   { type: 'uncle_maternal', tamil: 'மாமா'                 },
     'mother→sister':    { type: 'aunt_maternal',  tamil: 'சித்தி'               },
+
+    // Sibling's child = nephew/niece
+    'brother→son':      { type: 'nephew', tamil: 'மருமகன்' },
+    'brother→daughter': { type: 'niece',  tamil: 'மருமகள்' },
+    'sister→son':       { type: 'nephew', tamil: 'மருமகன்' },
+    'sister→daughter':  { type: 'niece',  tamil: 'மருமகள்' },
+
+    // Spouse chains
+    'spouse→father':    { type: 'father_in_law',  tamil: 'மாமனார்'   },
+    'spouse→mother':    { type: 'mother_in_law',  tamil: 'மாமியார்'  },
+    'spouse→brother':   { type: 'brother_in_law', tamil: 'மைத்துனன்' },
+    'spouse→sister':    { type: 'sister_in_law',  tamil: 'நாத்தனார்' },
+    'spouse→son':       { type: 'son',            tamil: 'மகன்'      },
+    'spouse→daughter':  { type: 'daughter',       tamil: 'மகள்'      },
   };
 
-  return EXTENDED[chain] || { type: midToTarget, tamil: midToTarget };
+  return EXTENDED[chain] || DIRECT[midToTarget] || { type: midToTarget, tamil: midToTarget };
 }
 
 // ─────────────────────────────────────────
