@@ -1007,4 +1007,84 @@ router.get('/network/:user_id', async (req, res) => {
 });
 
 
+// ─────────────────────────────────────────
+// PUT /api/relationships/:id
+// Edit an existing relationship type
+// Only the creator (from_user_id) can edit
+// ─────────────────────────────────────────
+router.put('/:id', async (req, res) => {
+  const { id } = req.params;
+  const { relation_type } = req.body;
+
+  if (!relation_type) {
+    return res.status(400).json({ error: 'relation_type is required' });
+  }
+
+  const tamilMap = {
+    father: 'அப்பா',
+    mother: 'அம்மா',
+    son: 'மகன்',
+    daughter: 'மகள்',
+    brother: 'அண்ணன்/தம்பி',
+    sister: 'அக்கா/தங்கை',
+    spouse: 'கணவன்/மனைவி',
+    grandfather_paternal: 'தாத்தா (அப்பா பக்கம்)',
+    grandmother_paternal: 'பாட்டி (அப்பா பக்கம்)',
+    grandfather_maternal: 'தாத்தா (அம்மா பக்கம்)',
+    grandmother_maternal: 'பாட்டி (அம்மா பக்கம்)',
+    uncle_paternal: 'பெரியப்பா/சித்தப்பா',
+    aunt_paternal: 'அத்தை',
+    uncle_maternal: 'மாமா',
+    aunt_maternal: 'சித்தி',
+    nephew: 'மருமகன்',
+    niece: 'மருமகள்',
+    son_in_law: 'மருமகன்',
+    daughter_in_law: 'மருமகள்',
+    father_in_law: 'மாமனார்',
+    mother_in_law: 'மாமியார்',
+    brother_in_law: 'மைத்துனன்',
+    sister_in_law: 'நாத்தனார்',
+    cousin: 'உறவினர்',
+    grandson: 'பேரன்',
+    granddaughter: 'பேத்தி',
+  };
+
+  const relation_tamil = tamilMap[relation_type] || relation_type;
+
+  try {
+    // Verify this relationship exists and belongs to the current user
+    const { data: existing } = await supabase
+      .from('pmf_relationships')
+      .select('id, from_user_id')
+      .eq('id', id)
+      .single();
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Relationship not found' });
+    }
+
+    if (existing.from_user_id !== req.user.id) {
+      return res.status(403).json({ error: 'You can only edit relationships you created' });
+    }
+
+    const { data, error } = await supabase
+      .from('pmf_relationships')
+      .update({ relation_type, relation_tamil })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return res.json({
+      success: true,
+      relationship: data,
+      message: 'உறவு புதுப்பிக்கப்பட்டது / Relationship updated'
+    });
+  } catch (err) {
+    console.error('Edit relationship error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
