@@ -398,7 +398,7 @@ router.get('/tree/:user_id', async (req, res) => {
         const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.to_user_id).single();
         if (u) nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
           relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
-          generation: gen, is_offline: false });
+          generation: gen, is_offline: false, relationship_id: rel.id });
       }
       visited.add(rel.to_user_id);
     }
@@ -434,7 +434,7 @@ router.get('/tree/:user_id', async (req, res) => {
       const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.from_user_id).single();
       if (u) nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
         relation_type: revType, relation_tamil: rel.relation_tamil,
-        generation: gen, is_offline: false });
+        generation: gen, is_offline: false, relationship_id: rel.id });
       visited.add(rel.from_user_id);
     }
   }
@@ -471,7 +471,7 @@ router.get('/tree/:user_id', async (req, res) => {
         if (u && !nodeMap.has(u.id)) {
           nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
             relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
-            generation: nextGen, is_offline: false });
+            generation: nextGen, is_offline: false, relationship_id: rel.id });
         }
       }
     }
@@ -512,7 +512,7 @@ router.get('/tree/:user_id', async (req, res) => {
         if (u) {
           nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
             relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
-            generation: nextGen, is_offline: false });
+            generation: nextGen, is_offline: false, relationship_id: rel.id });
         }
       }
     }
@@ -1052,10 +1052,10 @@ router.put('/:id', async (req, res) => {
   const relation_tamil = tamilMap[relation_type] || relation_type;
 
   try {
-    // Verify this relationship exists and belongs to the current user
+    // Verify this relationship exists and current user is one of the parties
     const { data: existing } = await supabase
       .from('pmf_relationships')
-      .select('id, from_user_id')
+      .select('id, from_user_id, to_user_id')
       .eq('id', id)
       .single();
 
@@ -1063,8 +1063,12 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Relationship not found' });
     }
 
-    if (existing.from_user_id !== req.user.id) {
-      return res.status(403).json({ error: 'You can only edit relationships you created' });
+    const isParty =
+      existing.from_user_id === req.user.id ||
+      existing.to_user_id === req.user.id;
+
+    if (!isParty) {
+      return res.status(403).json({ error: 'You can only edit relationships you are part of' });
     }
 
     const { data, error } = await supabase
