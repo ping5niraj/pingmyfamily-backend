@@ -4,6 +4,7 @@ const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const { router: suggestionsRouter } = require('./routes/suggestions');
 
 app.use(cors());
 app.use(express.json());
@@ -24,6 +25,7 @@ app.use('/api/telegram',      require('./routes/telegram'));
 app.use('/api/tree-invite',   require('./routes/treeinvite'));
 app.use('/api/kuthams',       require('./routes/kuthams'));
 app.use('/api/admin',         require('./routes/admin'));
+app.use('/api/suggestions', suggestionsRouter);
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
@@ -37,3 +39,6 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`PingMyFamily API running on port ${PORT}`);
 });
+
+
+

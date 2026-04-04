@@ -4,6 +4,7 @@ const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const authMiddleware = require('../middleware/auth');
 const { sendEmail, sendTelegram } = require('../services/notifications');
+const { generateSuggestionsForUser } = require('./suggestions');
 
 router.use(authMiddleware);
 
@@ -287,6 +288,14 @@ router.post('/verify', async (req, res) => {
 
   const { data: acceptor } = await supabase
     .from('pmf_users').select('name').eq('id', req.user.id).single();
+
+  // Trigger suggestion generation for both users after verification
+  try {
+    await generateSuggestionsForUser(req.user.id);
+    await generateSuggestionsForUser(rel.from_user?.id);
+  } catch (e) {
+    console.error('Suggestion generation error (non-fatal):', e.message);
+  }
 
   if (rel.from_user?.email) {
     await sendEmail({
