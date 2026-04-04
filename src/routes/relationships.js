@@ -453,6 +453,10 @@ router.get('/tree/:user_id', async (req, res) => {
   for (const [userId, baseGen] of directGenMap) {
     if (Math.abs(baseGen) < 1) continue; // only recurse into non-current gen
 
+    // Get the root's relation type to this intermediary (for label inference)
+    const intermediaryNode = nodeMap.get(userId);
+    const rootToIntermediary = intermediaryNode?.relation_type;
+
     const { data: subRels } = await supabase
       .from('pmf_relationships')
       .select('id, relation_type, relation_tamil, is_offline, offline_name, offline_gender, to_user_id')
@@ -465,22 +469,29 @@ router.get('/tree/:user_id', async (req, res) => {
       if (nextGen < -2 || nextGen > 3) continue;
       if (nextGen === 0) continue; // skip current gen via traversal (avoid re-adding root's peers)
 
+      // Infer correct Tamil label from root's perspective
+      const inferredLabel = rootToIntermediary
+        ? getExtendedLabel(rootToIntermediary, rel.relation_type)
+        : { type: rel.relation_type, tamil: rel.relation_tamil };
+
       if (rel.is_offline) {
         const nodeId = `offline-${userId}-${(rel.offline_name||'').replace(/\s/g,'-').toLowerCase()}`;
         if (!nodeMap.has(nodeId)) {
           nodeMap.set(nodeId, {
             id: nodeId, name: rel.offline_name, kutham: null,
-            relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+            relation_type: inferredLabel.type, relation_tamil: inferredLabel.tamil,
             generation: nextGen, is_offline: true, offline_gender: rel.offline_gender,
           });
         }
       } else if (rel.to_user_id && !visited.has(rel.to_user_id)) {
         visited.add(rel.to_user_id);
-        const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.to_user_id).single();
-        if (u && !nodeMap.has(u.id)) {
-          nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
-            relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
-            generation: nextGen, is_offline: false, relationship_id: rel.id });
+        if (!nodeMap.has(rel.to_user_id)) {
+          const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.to_user_id).single();
+          if (u) {
+            nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
+              relation_type: inferredLabel.type, relation_tamil: inferredLabel.tamil,
+              generation: nextGen, is_offline: false, relationship_id: rel.id });
+          }
         }
       }
     }
@@ -506,21 +517,28 @@ router.get('/tree/:user_id', async (req, res) => {
       const nextGen = node.generation + delta;
       if (nextGen < -2 || nextGen > 3) continue;
       if (nextGen === 0) continue; // skip current gen
+      if (visited.has(rel.to_user_id)) continue; // strict dedup
+
+      // Infer correct Tamil label from root's perspective
+      const inferredLabel = node.relation_type
+        ? getExtendedLabel(node.relation_type, rel.relation_type)
+        : { type: rel.relation_type, tamil: rel.relation_tamil };
 
       if (rel.is_offline) {
         const nodeId = `offline-${node.id}-${(rel.offline_name||'').replace(/\s/g,'-').toLowerCase()}`;
         if (!nodeMap.has(nodeId)) {
           nodeMap.set(nodeId, {
             id: nodeId, name: rel.offline_name, kutham: null,
-            relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+            relation_type: inferredLabel.type, relation_tamil: inferredLabel.tamil,
             generation: nextGen, is_offline: true, offline_gender: rel.offline_gender,
           });
         }
       } else if (rel.to_user_id && rel.to_user_id !== rootId && !nodeMap.has(rel.to_user_id)) {
+        visited.add(rel.to_user_id);
         const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.to_user_id).single();
         if (u) {
           nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
-            relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+            relation_type: inferredLabel.type, relation_tamil: inferredLabel.tamil,
             generation: nextGen, is_offline: false, relationship_id: rel.id });
         }
       }
