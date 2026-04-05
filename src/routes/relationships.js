@@ -1327,4 +1327,328 @@ router.get('/linked-chain/:user_id', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────
+// GET /api/relationships/linkedin-tree/:user_id
+// குடும்ப வலைதளம் — Complete tree in one API call
+// BFS traversal — backend owns all logic
+// Returns { nodes[], edges[] } — frontend is pure renderer
+//
+// DATA MAPS — single source of truth
+// To add a new relation: add to REL_GEN only. Nothing else changes.
+// ─────────────────────────────────────────
+
+const LINKEDIN_REL_GEN = {
+  great_grandfather:    3,
+  great_grandmother:    3,
+  grandfather_paternal: 2,
+  grandmother_paternal: 2,
+  grandfather_maternal: 2,
+  grandmother_maternal: 2,
+  father:               1,
+  mother:               1,
+  uncle_paternal:       1,
+  uncle_maternal:       1,
+  aunt_paternal:        1,
+  aunt_maternal:        1,
+  father_in_law:        1,
+  mother_in_law:        1,
+  brother:              0,
+  sister:               0,
+  spouse:               0,
+  brother_in_law:       0,
+  sister_in_law:        0,
+  son:                 -1,
+  daughter:            -1,
+  nephew:              -1,
+  niece:               -1,
+  son_in_law:          -1,
+  daughter_in_law:     -1,
+  grandson:            -2,
+  granddaughter:       -2,
+};
+
+const LINKEDIN_TAMIL_MAP = {
+  great_grandfather:    'கொள்ளுத்தாத்தா',
+  great_grandmother:    'கொள்ளுப்பாட்டி',
+  grandfather_paternal: 'தாத்தா (அப்பா பக்கம்)',
+  grandmother_paternal: 'பாட்டி (அப்பா பக்கம்)',
+  grandfather_maternal: 'தாத்தா (அம்மா பக்கம்)',
+  grandmother_maternal: 'பாட்டி (அம்மா பக்கம்)',
+  father:               'அப்பா',
+  mother:               'அம்மா',
+  uncle_paternal:       'பெரியப்பா/சித்தப்பா',
+  uncle_maternal:       'மாமா',
+  aunt_paternal:        'அத்தை',
+  aunt_maternal:        'சித்தி',
+  father_in_law:        'மாமனார்',
+  mother_in_law:        'மாமியார்',
+  brother:              'அண்ணன்/தம்பி',
+  sister:               'அக்கா/தங்கை',
+  spouse:               'கணவன்/மனைவி',
+  brother_in_law:       'மைத்துனன்',
+  sister_in_law:        'நாத்தனார்',
+  son:                  'மகன்',
+  daughter:             'மகள்',
+  nephew:               'மருமகன்',
+  niece:                'மருமகள்',
+  son_in_law:           'மருமகன்',
+  daughter_in_law:      'மருமகள்',
+  grandson:             'பேரன்',
+  granddaughter:        'பேத்தி',
+};
+
+// Reverse relation map — for incoming relations
+const LINKEDIN_REV_MAP = {
+  son:              'father',
+  daughter:         'mother',
+  father:           'son',
+  mother:           'daughter',
+  brother:          'brother',
+  sister:           'sister',
+  spouse:           'spouse',
+  nephew:           'uncle_paternal',
+  niece:            'aunt_paternal',
+  uncle_paternal:   'nephew',
+  aunt_paternal:    'niece',
+  uncle_maternal:   'nephew',
+  aunt_maternal:    'niece',
+  grandson:         'grandfather_paternal',
+  granddaughter:    'grandmother_paternal',
+  grandfather_paternal: 'grandson',
+  grandmother_paternal: 'granddaughter',
+  grandfather_maternal: 'grandson',
+  grandmother_maternal: 'granddaughter',
+  son_in_law:       'father_in_law',
+  daughter_in_law:  'mother_in_law',
+  father_in_law:    'son_in_law',
+  mother_in_law:    'daughter_in_law',
+  brother_in_law:   'brother_in_law',
+  sister_in_law:    'sister_in_law',
+  great_grandfather: 'great_grandson',
+  great_grandmother: 'great_granddaughter',
+};
+
+router.get('/linkedin-tree/:user_id', async (req, res) => {
+  const rootId = req.params.user_id;
+  const MAX_GEN = parseInt(req.query.maxGen) || 3;  // configurable depth
+  const MIN_GEN = parseInt(req.query.minGen) || -2; // configurable depth
+
+  try {
+    // Get root user
+    const { data: rootUser } = await supabase
+      .from('pmf_users')
+      .select('id, name, gender, kutham, profile_photo, date_of_birth, is_offline')
+      .eq('id', rootId)
+      .single();
+
+    if (!rootUser) return res.status(404).json({ error: 'User not found' });
+
+    // BFS state
+    const seen = new Set([rootId]);
+    const queue = [{ userId: rootId, generation: 0 }];
+    const userGenMap = new Map([[rootId, 0]]); // userId → absolute generation
+
+    // Result containers
+    const nodes = [{
+      id: rootId,
+      name: rootUser.name,
+      gender: rootUser.gender,
+      kutham: rootUser.kutham,
+      profile_photo: rootUser.profile_photo,
+      date_of_birth: rootUser.date_of_birth,
+      is_offline: rootUser.is_offline || false,
+      generation: 0,
+      relation_type: null,
+      relation_tamil: null,
+      verified: true,
+      is_root: true,
+    }];
+
+    const edges = [];
+
+    // BFS loop — no hardcoded levels, driven entirely by data maps
+    while (queue.length > 0) {
+      const { userId, generation } = queue.shift();
+
+      // Fetch outgoing verified relations
+      const { data: outgoing } = await supabase
+        .from('pmf_relationships')
+        .select(`
+          id, relation_type, relation_tamil, verification_status,
+          is_offline, offline_name, offline_gender,
+          to_user:to_user_id(id, name, gender, kutham, profile_photo, date_of_birth)
+        `)
+        .eq('from_user_id', userId)
+        .eq('verification_status', 'verified');
+
+      // Fetch incoming verified relations
+      const { data: incoming } = await supabase
+        .from('pmf_relationships')
+        .select(`
+          id, relation_type, relation_tamil, verification_status,
+          from_user:from_user_id(id, name, gender, kutham, profile_photo, date_of_birth)
+        `)
+        .eq('to_user_id', userId)
+        .eq('verification_status', 'verified')
+        .eq('is_offline', false);
+
+      // Process outgoing relations
+      for (const rel of (outgoing || [])) {
+        // Look up generation offset from data map — no hardcoding
+        const genOffset = LINKEDIN_REL_GEN[rel.relation_type];
+        if (genOffset === undefined) continue; // unknown relation — skip cleanly
+
+        const absGen = generation + genOffset - (generation === 0 ? 0 : 0);
+
+        // Calculate absolute generation from root
+        // For outgoing: if relation goes "up" (positive), node is in past
+        // If relation goes "down" (negative), node is in future
+        const targetGen = generation + genOffset;
+
+        // Boundary check — driven by config parameters, not hardcoded
+        if (targetGen > MAX_GEN || targetGen < MIN_GEN) continue;
+
+        if (rel.is_offline) {
+          const offlineId = `offline-${rel.id}`;
+          if (seen.has(offlineId)) continue;
+          seen.add(offlineId);
+          nodes.push({
+            id: offlineId,
+            name: rel.offline_name,
+            gender: rel.offline_gender,
+            kutham: null,
+            profile_photo: null,
+            date_of_birth: null,
+            is_offline: true,
+            generation: targetGen,
+            relation_type: rel.relation_type,
+            relation_tamil: LINKEDIN_TAMIL_MAP[rel.relation_type] || rel.relation_tamil,
+            verified: true,
+            is_root: false,
+          });
+          edges.push({
+            from_id: userId,
+            to_id: offlineId,
+            relation_type: rel.relation_type,
+            relation_tamil: LINKEDIN_TAMIL_MAP[rel.relation_type] || rel.relation_tamil,
+            verified: true,
+            generation_from: generation,
+            generation_to: targetGen,
+          });
+          continue;
+        }
+
+        if (!rel.to_user) continue;
+        const targetId = rel.to_user.id;
+        if (seen.has(targetId)) continue;
+        seen.add(targetId);
+        userGenMap.set(targetId, targetGen);
+
+        nodes.push({
+          id: targetId,
+          name: rel.to_user.name,
+          gender: rel.to_user.gender,
+          kutham: rel.to_user.kutham,
+          profile_photo: rel.to_user.profile_photo,
+          date_of_birth: rel.to_user.date_of_birth,
+          is_offline: false,
+          generation: targetGen,
+          relation_type: rel.relation_type,
+          relation_tamil: LINKEDIN_TAMIL_MAP[rel.relation_type] || rel.relation_tamil,
+          verified: true,
+          is_root: false,
+        });
+
+        edges.push({
+          from_id: userId,
+          to_id: targetId,
+          relation_type: rel.relation_type,
+          relation_tamil: LINKEDIN_TAMIL_MAP[rel.relation_type] || rel.relation_tamil,
+          verified: true,
+          generation_from: generation,
+          generation_to: targetGen,
+        });
+
+        // Continue BFS only if within bounds
+        if (targetGen > MIN_GEN && targetGen < MAX_GEN) {
+          queue.push({ userId: targetId, generation: targetGen });
+        }
+      }
+
+      // Process incoming relations — reverse them
+      for (const rel of (incoming || [])) {
+        if (!rel.from_user) continue;
+
+        // Reverse the relation type using data map — no hardcoding
+        const revType = LINKEDIN_REV_MAP[rel.relation_type];
+        if (!revType) continue;
+
+        const genOffset = LINKEDIN_REL_GEN[revType];
+        if (genOffset === undefined) continue;
+
+        const targetGen = generation + genOffset;
+        if (targetGen > MAX_GEN || targetGen < MIN_GEN) continue;
+
+        const targetId = rel.from_user.id;
+        if (seen.has(targetId)) continue;
+        seen.add(targetId);
+        userGenMap.set(targetId, targetGen);
+
+        // Gender-aware reversal for son/daughter
+        let finalType = revType;
+        const gender = rel.from_user.gender;
+        if (rel.relation_type === 'father' || rel.relation_type === 'mother') {
+          finalType = gender === 'female' ? 'daughter' : 'son';
+        } else if (rel.relation_type === 'son' || rel.relation_type === 'daughter') {
+          finalType = gender === 'female' ? 'mother' : 'father';
+        } else if (rel.relation_type === 'brother' || rel.relation_type === 'sister') {
+          finalType = gender === 'female' ? 'sister' : 'brother';
+        }
+
+        nodes.push({
+          id: targetId,
+          name: rel.from_user.name,
+          gender: rel.from_user.gender,
+          kutham: rel.from_user.kutham,
+          profile_photo: rel.from_user.profile_photo,
+          date_of_birth: rel.from_user.date_of_birth,
+          is_offline: false,
+          generation: targetGen,
+          relation_type: finalType,
+          relation_tamil: LINKEDIN_TAMIL_MAP[finalType] || finalType,
+          verified: rel.verification_status === 'verified',
+          is_root: false,
+        });
+
+        edges.push({
+          from_id: targetId,
+          to_id: userId,
+          relation_type: rel.relation_type,
+          relation_tamil: LINKEDIN_TAMIL_MAP[rel.relation_type] || rel.relation_tamil,
+          verified: rel.verification_status === 'verified',
+          generation_from: targetGen,
+          generation_to: generation,
+        });
+
+        if (targetGen > MIN_GEN && targetGen < MAX_GEN) {
+          queue.push({ userId: targetId, generation: targetGen });
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      root_id: rootId,
+      nodes,
+      edges,
+      config: { max_gen: MAX_GEN, min_gen: MIN_GEN },
+    });
+
+  } catch (err) {
+    console.error('LinkedIn tree error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
+
