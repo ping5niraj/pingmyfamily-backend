@@ -1444,9 +1444,10 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
     if (!rootUser) return res.status(404).json({ error: 'User not found' });
 
     // BFS state
-    const seen = new Set([rootId]);
-    const queue = [{ userId: rootId, generation: 0 }];
-    const userGenMap = new Map([[rootId, 0]]); // userId → absolute generation
+    const seen   = new Set([rootId]); // tracks nodes added to results
+    const queued = new Set([rootId]); // tracks nodes added to queue — prevents duplicate processing
+    const queue  = [{ userId: rootId, generation: 0 }];
+    const userGenMap = new Map([[rootId, 0]]);
 
     // Result containers
     const nodes = [{
@@ -1565,8 +1566,9 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
           generation_to: targetGen,
         });
 
-        // Continue BFS only if within bounds
-        if (targetGen > MIN_GEN && targetGen < MAX_GEN) {
+        // Continue BFS only if within bounds and not already queued
+        if (targetGen > MIN_GEN && targetGen < MAX_GEN && !queued.has(targetId)) {
+          queued.add(targetId);
           queue.push({ userId: targetId, generation: targetGen });
         }
       }
@@ -1626,7 +1628,8 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
           generation_to: generation,
         });
 
-        if (targetGen > MIN_GEN && targetGen < MAX_GEN) {
+        if (targetGen > MIN_GEN && targetGen < MAX_GEN && !queued.has(targetId)) {
+          queued.add(targetId);
           queue.push({ userId: targetId, generation: targetGen });
         }
       }
