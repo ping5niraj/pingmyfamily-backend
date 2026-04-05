@@ -1437,7 +1437,7 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
     // Get root user
     const { data: rootUser } = await supabase
       .from('pmf_users')
-      .select('id, name, gender, kutham, profile_photo, date_of_birth, is_offline')
+      .select('id, name, gender, kutham, profile_photo, date_of_birth')
       .eq('id', rootId)
       .single();
 
@@ -1456,7 +1456,7 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
       kutham: rootUser.kutham,
       profile_photo: rootUser.profile_photo,
       date_of_birth: rootUser.date_of_birth,
-      is_offline: rootUser.is_offline || false,
+      is_offline: false,
       generation: 0,
       relation_type: null,
       relation_tamil: null,
@@ -1498,11 +1498,7 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
         const genOffset = LINKEDIN_REL_GEN[rel.relation_type];
         if (genOffset === undefined) continue; // unknown relation — skip cleanly
 
-        const absGen = generation + genOffset - (generation === 0 ? 0 : 0);
-
         // Calculate absolute generation from root
-        // For outgoing: if relation goes "up" (positive), node is in past
-        // If relation goes "down" (negative), node is in future
         const targetGen = generation + genOffset;
 
         // Boundary check — driven by config parameters, not hardcoded
