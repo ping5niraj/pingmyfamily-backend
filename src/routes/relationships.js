@@ -389,6 +389,25 @@ router.get('/tree/:user_id', async (req, res) => {
   // Map of userId → generation for direct relations
   const directGenMap = new Map();
 
+  // Tamil label map — always use these instead of DB stored values
+  const DIRECT_TAMIL = {
+    father: 'அப்பா', mother: 'அம்மா',
+    son: 'மகன்', daughter: 'மகள்',
+    brother: 'அண்ணன்/தம்பி', sister: 'அக்கா/தங்கை',
+    spouse: 'மனைவி/கணவன்',
+    grandfather_paternal: 'தாத்தா (அப்பா பக்கம்)', grandmother_paternal: 'பாட்டி (அப்பா பக்கம்)',
+    grandfather_maternal: 'தாத்தா (அம்மா பக்கம்)', grandmother_maternal: 'பாட்டி (அம்மா பக்கம்)',
+    grandson: 'பேரன்', granddaughter: 'பேத்தி',
+    nephew: 'மருமகன்', niece: 'மருமகள்',
+    uncle_paternal: 'பெரியப்பா/சித்தப்பா', aunt_paternal: 'அத்தை',
+    uncle_maternal: 'மாமா', aunt_maternal: 'சித்தி',
+    son_in_law: 'மருமகன்', daughter_in_law: 'மருமகள்',
+    father_in_law: 'மாமனார்', mother_in_law: 'மாமியார்',
+    brother_in_law: 'மைத்துனன்', sister_in_law: 'நாத்தனார்',
+    cousin: 'உறவினர்',
+    great_grandfather: 'கொள்ளுத்தாத்தா', great_grandmother: 'கொள்ளுப்பாட்டி',
+  };
+
   // Process outgoing direct relations
   for (const rel of (directOut || [])) {
     const gen = GEN_FROM_ROOT[rel.relation_type] ?? 0;
@@ -406,7 +425,8 @@ router.get('/tree/:user_id', async (req, res) => {
       if (!nodeMap.has(rel.to_user_id)) {
         const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.to_user_id).single();
         if (u) nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
-          relation_type: rel.relation_type, relation_tamil: rel.relation_tamil,
+          relation_type: rel.relation_type,
+          relation_tamil: DIRECT_TAMIL[rel.relation_type] || rel.relation_tamil,
           generation: gen, is_offline: false, relationship_id: rel.id });
       }
       visited.add(rel.to_user_id);
@@ -440,11 +460,26 @@ router.get('/tree/:user_id', async (req, res) => {
       directGenMap.set(rel.from_user_id, gen);
     }
     if (!nodeMap.has(rel.from_user_id)) {
-      const { data: u } = await supabase.from('pmf_users').select('id, name, kutham').eq('id', rel.from_user_id).single();
-      if (u) nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
-        relation_type: revType, relation_tamil: rel.relation_tamil,
-        generation: gen, is_offline: false, relationship_id: rel.id });
-      visited.add(rel.from_user_id);
+      const { data: u } = await supabase
+        .from('pmf_users').select('id, name, kutham, gender').eq('id', rel.from_user_id).single();
+      if (u) {
+        // Gender-aware reversal for parent→child relations
+        let finalType = revType;
+        if (rel.relation_type === 'father' || rel.relation_type === 'mother') {
+          finalType = u.gender === 'female' ? 'daughter' : 'son';
+        } else if (rel.relation_type === 'brother' || rel.relation_type === 'sister') {
+          finalType = u.gender === 'female' ? 'sister' : 'brother';
+        } else if (rel.relation_type === 'grandfather_paternal' || rel.relation_type === 'grandfather_maternal') {
+          finalType = u.gender === 'female' ? 'granddaughter' : 'grandson';
+        } else if (rel.relation_type === 'grandmother_paternal' || rel.relation_type === 'grandmother_maternal') {
+          finalType = u.gender === 'female' ? 'granddaughter' : 'grandson';
+        }
+        const finalTamil = DIRECT_TAMIL[finalType] || finalType;
+        nodeMap.set(u.id, { id: u.id, name: u.name, kutham: u.kutham,
+          relation_type: finalType, relation_tamil: finalTamil,
+          generation: gen, is_offline: false, relationship_id: rel.id });
+        visited.add(rel.from_user_id);
+      }
     }
   }
 
@@ -1162,6 +1197,132 @@ router.put('/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('Edit relationship error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────
+// GET /api/relationships/linked-chain/:user_id
+// குடும்ப வலைதளம் — Family LinkedIn
+// Returns direct relations only (9 types: blood line + spouse)
+// No inference — exactly as stored in DB
+// Used for progressive expand-on-click chain view
+// ─────────────────────────────────────────
+
+const LINKEDIN_RELATIONS = new Set([
+  'father', 'mother',
+  'son', 'daughter',
+  'brother', 'sister',
+  'spouse',
+]);
+
+const LINKEDIN_TAMIL = {
+  father:   'அப்பா',
+  mother:   'அம்மா',
+  son:      'மகன்',
+  daughter: 'மகள்',
+  brother:  'அண்ணன்/தம்பி',
+  sister:   'அக்கா/தங்கை',
+  spouse:   'கணவன்/மனைவி',
+};
+
+router.get('/linked-chain/:user_id', async (req, res) => {
+  const { user_id } = req.params;
+
+  try {
+    // Get the user's own profile
+    const { data: rootUser } = await supabase
+      .from('pmf_users')
+      .select('id, name, gender, kutham, profile_photo, date_of_birth')
+      .eq('id', user_id)
+      .single();
+
+    if (!rootUser) return res.status(404).json({ error: 'User not found' });
+
+    // Get outgoing verified relations (user added them)
+    const { data: outgoing } = await supabase
+      .from('pmf_relationships')
+      .select(`
+        id, relation_type, relation_tamil, verification_status,
+        to_user:to_user_id(id, name, gender, kutham, profile_photo, date_of_birth)
+      `)
+      .eq('from_user_id', user_id)
+      .eq('verification_status', 'verified')
+      .eq('is_offline', false);
+
+    // Get incoming verified relations (they added user)
+    const { data: incoming } = await supabase
+      .from('pmf_relationships')
+      .select(`
+        id, relation_type, relation_tamil, verification_status,
+        from_user:from_user_id(id, name, gender, kutham, profile_photo, date_of_birth)
+      `)
+      .eq('to_user_id', user_id)
+      .eq('verification_status', 'verified')
+      .eq('is_offline', false);
+
+    const relations = [];
+    const seenUserIds = new Set();
+
+    // Process outgoing — use stored relation_type as-is
+    for (const rel of (outgoing || [])) {
+      if (!rel.to_user) continue;
+      if (!LINKEDIN_RELATIONS.has(rel.relation_type)) continue;
+      if (seenUserIds.has(rel.to_user.id)) continue;
+      seenUserIds.add(rel.to_user.id);
+
+      relations.push({
+        relationship_id: rel.id,
+        relation_type: rel.relation_type,
+        relation_tamil: LINKEDIN_TAMIL[rel.relation_type] || rel.relation_tamil,
+        user: rel.to_user,
+      });
+    }
+
+    // Process incoming — reverse the relation type
+    const REV = {
+      son: 'father', daughter: 'mother',
+      father: 'son', mother: 'daughter',
+      brother: 'brother', sister: 'sister',
+      spouse: 'spouse',
+    };
+
+    for (const rel of (incoming || [])) {
+      if (!rel.from_user) continue;
+      if (!LINKEDIN_RELATIONS.has(rel.relation_type)) continue;
+      if (seenUserIds.has(rel.from_user.id)) continue;
+
+      // Gender-aware reversal
+      let revType = REV[rel.relation_type] || rel.relation_type;
+      const gender = rel.from_user.gender;
+      if (rel.relation_type === 'father' || rel.relation_type === 'mother') {
+        revType = gender === 'female' ? 'daughter' : 'son';
+      } else if (rel.relation_type === 'son' || rel.relation_type === 'daughter') {
+        revType = gender === 'female' ? 'mother' : 'father';
+      } else if (rel.relation_type === 'brother' || rel.relation_type === 'sister') {
+        revType = gender === 'female' ? 'sister' : 'brother';
+      }
+
+      if (!LINKEDIN_RELATIONS.has(revType)) continue;
+      seenUserIds.add(rel.from_user.id);
+
+      relations.push({
+        relationship_id: rel.id,
+        relation_type: revType,
+        relation_tamil: LINKEDIN_TAMIL[revType] || revType,
+        user: rel.from_user,
+      });
+    }
+
+    return res.json({
+      success: true,
+      user: rootUser,
+      relations,
+      has_more: relations.length > 0,
+    });
+
+  } catch (err) {
+    console.error('Linked chain error:', err);
     return res.status(500).json({ error: err.message });
   }
 });
