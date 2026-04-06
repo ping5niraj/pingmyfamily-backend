@@ -78,21 +78,36 @@ router.post('/', async (req, res) => {
 
     // Determine the offline_user_id to link to
     let resolvedOfflineUserId = offline_user_id || null;
+    let resolvedName = offline_name || null;
+    let resolvedGender = offline_gender || 'other';
+
+    if (resolvedOfflineUserId && !resolvedName) {
+      // Fetch name and gender from existing pmf_offline_users record
+      const { data: existingUser } = await supabase
+        .from('pmf_offline_users')
+        .select('name, gender')
+        .eq('id', resolvedOfflineUserId)
+        .single();
+      if (existingUser) {
+        resolvedName = existingUser.name;
+        resolvedGender = existingUser.gender || 'other';
+      }
+    }
 
     if (!resolvedOfflineUserId) {
       // No existing user confirmed — create new pmf_offline_users record
       const { data: newOfflineUser, error: ouError } = await supabase
         .from('pmf_offline_users')
         .insert({
-          name: offline_name.trim(),
-          gender: offline_gender || 'other',
+          name: resolvedName.trim(),
+          gender: resolvedGender,
           added_by: req.user.id,
         })
         .select().single();
 
       if (ouError) {
         console.error('Create offline user error:', ouError);
-        return res.status(500).json({ error: 'Failed to create offline user' });
+        return res.status(500).json({ error: 'Failed to create offline user: ' + ouError.message });
       }
       resolvedOfflineUserId = newOfflineUser.id;
     }
@@ -108,20 +123,20 @@ router.post('/', async (req, res) => {
         verification_status: 'verified',
         created_by: req.user.id,
         is_offline: true,
-        offline_name: offline_name ? offline_name.trim() : null,
-        offline_gender: offline_gender || 'other',
+        offline_name: resolvedName,
+        offline_gender: resolvedGender,
         offline_user_id: resolvedOfflineUserId,
       })
       .select().single();
 
     if (createError) {
       console.error('Offline relationship error:', createError);
-      return res.status(500).json({ error: 'Failed to create offline relationship' });
+      return res.status(500).json({ error: 'Failed to create offline relationship: ' + createError.message });
     }
 
     return res.json({
       success: true, relationship, offline: true,
-      message: `${offline_name || 'Member'} குடும்ப மரத்தில் சேர்க்கப்பட்டார்`
+      message: `${resolvedName} குடும்ப மரத்தில் சேர்க்கப்பட்டார்`
     });
   }
 
