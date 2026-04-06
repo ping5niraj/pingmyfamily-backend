@@ -1476,7 +1476,8 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
         .from('pmf_relationships')
         .select(`
           id, relation_type, relation_tamil, verification_status,
-          is_offline, offline_name, offline_gender,
+          is_offline, offline_name, offline_gender, offline_user_id,
+          offline_user:offline_user_id(id, name, gender, kutham),
           to_user:to_user_id(id, name, gender, kutham, profile_photo, date_of_birth)
         `)
         .eq('from_user_id', userId)
@@ -1506,14 +1507,16 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
         if (targetGen > MAX_GEN || targetGen < MIN_GEN) continue;
 
         if (rel.is_offline) {
-          const offlineId = `offline-${rel.id}`;
+          // Use offline_user_id as the unique key — proper dedup by UUID
+          const offlineUser = rel.offline_user;
+          const offlineId = rel.offline_user_id || `offline-${rel.id}`;
           if (seen.has(offlineId)) continue;
           seen.add(offlineId);
           nodes.push({
             id: offlineId,
-            name: rel.offline_name,
-            gender: rel.offline_gender,
-            kutham: null,
+            name: offlineUser?.name || rel.offline_name,
+            gender: offlineUser?.gender || rel.offline_gender,
+            kutham: offlineUser?.kutham || null,
             profile_photo: null,
             date_of_birth: null,
             is_offline: true,
