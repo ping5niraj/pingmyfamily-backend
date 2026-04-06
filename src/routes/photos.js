@@ -120,4 +120,57 @@ router.delete('/remove', authMiddleware, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────
+// POST /api/photos/upload-media
+// Upload feed post media (image OR video) to Cloudflare R2
+// Does NOT update user profile — purely returns the R2 URL
+// Form data: { media: file }
+// Returns: { success, media_url, media_type }
+// Max size: 50MB (covers short videos up to 30 seconds)
+// ─────────────────────────────────────────
+const uploadMedia = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB — covers 30-second video clips
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/') || file.mimetype.startsWith('video/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image and video files are allowed'));
+    }
+  }
+});
+
+router.post('/upload-media', authMiddleware, uploadMedia.single('media'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+
+    const isVideo = req.file.mimetype.startsWith('video/');
+    const ext     = req.file.originalname.split('.').pop() || (isVideo ? 'mp4' : 'jpg');
+    const folder  = isVideo ? 'feed-videos' : 'feed-images';
+    const fileName = `${folder}/${req.user.id}/${uuidv4()}.${ext}`;
+
+    // Upload to R2
+    await r2Client.send(new PutObjectCommand({
+      Bucket:      process.env.R2_BUCKET_NAME,
+      Key:         fileName,
+      Body:        req.file.buffer,
+      ContentType: req.file.mimetype,
+    }));
+
+    const mediaUrl = `${process.env.R2_PUBLIC_URL}/${fileName}`;
+
+    return res.json({
+      success:    true,
+      media_url:  mediaUrl,
+      media_type: isVideo ? 'video' : 'image',
+    });
+
+  } catch (err) {
+    console.error('Media upload error:', err);
+    return res.status(500).json({ error: 'Media upload failed: ' + err.message });
+  }
+});
+
 module.exports = router;
