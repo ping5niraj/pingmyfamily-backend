@@ -26,7 +26,8 @@ app.use('/api/tree-invite',   require('./routes/treeinvite'));
 app.use('/api/kuthams',       require('./routes/kuthams'));
 app.use('/api/admin',         require('./routes/admin'));
 app.use('/api/suggestions',   suggestionsRouter);
-app.use('/api/posts',         require('./routes/posts'));   // ← Social feed
+app.use('/api/posts',         require('./routes/posts'));   // Social feed
+app.use('/api/ads',           require('./routes/ads'));     // Business Agent ads
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });

@@ -116,12 +116,38 @@ router.delete('/kuthams/:id', adminAuth, async (req, res) => {
 router.get('/users', adminAuth, async (req, res) => {
   const { search } = req.query;
   let query = supabase.from('pmf_users')
-    .select('id, name, phone, gender, kutham, district, date_of_birth, created_at, status')
+    .select('id, name, phone, gender, kutham, district, date_of_birth, created_at, status, is_business_agent')
     .order('created_at', { ascending: false }).limit(100);
   if (search) query = query.or(`name.ilike.%${search}%,phone.ilike.%${search}%`);
   const { data: users, error } = await query;
   if (error) return res.status(500).json({ error: 'Failed to fetch users' });
   return res.json({ success: true, users: users || [], count: users?.length || 0 });
+});
+
+// ─────────────────────────────────────────
+// POST /api/admin/upgrade-agent
+// Upgrade or downgrade a user to Business Agent
+// Body: { user_id, is_business_agent: true/false }
+// ─────────────────────────────────────────
+router.post('/upgrade-agent', adminAuth, async (req, res) => {
+  const { user_id, is_business_agent } = req.body;
+  if (!user_id) return res.status(400).json({ error: 'user_id required' });
+
+  const { data, error } = await supabase
+    .from('pmf_users')
+    .update({ is_business_agent: !!is_business_agent })
+    .eq('id', user_id)
+    .select('id, name, is_business_agent')
+    .single();
+
+  if (error) return res.status(500).json({ error: 'Failed to update user' });
+  return res.json({
+    success: true,
+    user: data,
+    message: is_business_agent
+      ? `${data.name} Business Agent ஆக மேம்படுத்தப்பட்டார்`
+      : `${data.name} Business Agent அந்தஸ்து நீக்கப்பட்டது`,
+  });
 });
 
 module.exports = router;
