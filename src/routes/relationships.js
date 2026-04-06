@@ -61,7 +61,7 @@ async function findUserByPhone(rawPhone) {
 // ─────────────────────────────────────────
 router.post('/', async (req, res) => {
   const { to_user_phone, relation_type, relation_tamil,
-          is_offline, offline_name, offline_gender } = req.body;
+          is_offline, offline_name, offline_gender, offline_user_id } = req.body;
 
   if (!relation_type) {
     return res.status(400).json({ error: 'relation_type is required' });
@@ -69,13 +69,35 @@ router.post('/', async (req, res) => {
 
   // ── OFFLINE / DECEASED MEMBER FLOW ──
   if (is_offline) {
-    if (!offline_name) {
+    if (!offline_name && !offline_user_id) {
       return res.status(400).json({ error: 'offline_name is required for offline members' });
     }
 
     const { data: fromUser } = await supabase
       .from('pmf_users').select('id, name, phone, gender').eq('id', req.user.id).single();
 
+    // Determine the offline_user_id to link to
+    let resolvedOfflineUserId = offline_user_id || null;
+
+    if (!resolvedOfflineUserId) {
+      // No existing user confirmed — create new pmf_offline_users record
+      const { data: newOfflineUser, error: ouError } = await supabase
+        .from('pmf_offline_users')
+        .insert({
+          name: offline_name.trim(),
+          gender: offline_gender || 'other',
+          added_by: req.user.id,
+        })
+        .select().single();
+
+      if (ouError) {
+        console.error('Create offline user error:', ouError);
+        return res.status(500).json({ error: 'Failed to create offline user' });
+      }
+      resolvedOfflineUserId = newOfflineUser.id;
+    }
+
+    // Create the relationship linked to pmf_offline_users
     const { data: relationship, error: createError } = await supabase
       .from('pmf_relationships')
       .insert({
@@ -86,8 +108,9 @@ router.post('/', async (req, res) => {
         verification_status: 'verified',
         created_by: req.user.id,
         is_offline: true,
-        offline_name: offline_name.trim(),
-        offline_gender: offline_gender || 'other'
+        offline_name: offline_name ? offline_name.trim() : null,
+        offline_gender: offline_gender || 'other',
+        offline_user_id: resolvedOfflineUserId,
       })
       .select().single();
 
@@ -98,7 +121,7 @@ router.post('/', async (req, res) => {
 
     return res.json({
       success: true, relationship, offline: true,
-      message: `${offline_name} குடும்ப மரத்தில் சேர்க்கப்பட்டார்`
+      message: `${offline_name || 'Member'} குடும்ப மரத்தில் சேர்க்கப்பட்டார்`
     });
   }
 
