@@ -10,7 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.json({ service: 'PingMyFamily API', status: 'running', version: '2.4.0' });
+  res.json({ service: 'PingMyFamily API', status: 'running', version: '2.5.0' });
 });
 
 app.use('/api/auth',          require('./routes/auth'));
@@ -25,7 +25,8 @@ app.use('/api/telegram',      require('./routes/telegram'));
 app.use('/api/tree-invite',   require('./routes/treeinvite'));
 app.use('/api/kuthams',       require('./routes/kuthams'));
 app.use('/api/admin',         require('./routes/admin'));
-app.use('/api/suggestions', suggestionsRouter);
+app.use('/api/suggestions',   suggestionsRouter);
+app.use('/api/posts',         require('./routes/posts'));   // ← Social feed
 
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
@@ -39,6 +40,3 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`PingMyFamily API running on port ${PORT}`);
 });
-
-
-
