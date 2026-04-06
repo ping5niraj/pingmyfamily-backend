@@ -1652,5 +1652,47 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────
+// GET /api/offline-users/search
+// Search existing offline users in the family network
+// Used in AddRelative to prevent duplicate offline nodes
+// Query: ?name=Pappammal&user_id=<current_user_id>
+// ─────────────────────────────────────────
+router.get('/offline-users/search', async (req, res) => {
+  const { name, user_id } = req.query;
+  if (!name || name.trim().length < 2) {
+    return res.json({ success: true, results: [] });
+  }
+
+  try {
+    // Find offline users in this user's family network
+    // by searching pmf_offline_users by name match
+    const { data, error } = await supabase
+      .from('pmf_offline_users')
+      .select(`
+        id, name, gender, kutham,
+        added_by_user:added_by(id, name)
+      `)
+      .ilike('name', `%${name.trim()}%`)
+      .limit(10);
+
+    if (error) throw error;
+
+    return res.json({
+      success: true,
+      results: (data || []).map(u => ({
+        id: u.id,
+        name: u.name,
+        gender: u.gender,
+        kutham: u.kutham,
+        added_by: u.added_by_user?.name || 'Unknown',
+      })),
+    });
+  } catch (err) {
+    console.error('Offline search error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
 
