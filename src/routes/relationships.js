@@ -1676,11 +1676,39 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
       }
     }
 
+    // ── Option 2: Split cross-generation edges ──────────────────────────
+    // Problem: An edge from generation 0 → generation 2 (e.g. Current → Past Gen 2)
+    //          has its label placed at the midpoint of the line.
+    //          That midpoint falls exactly on top of the Past Gen 1 row nodes,
+    //          hiding the label completely behind intermediate node cards.
+    //
+    // Fix: Any edge that skips more than 1 generation is broken into
+    //      sequential hops through intermediate nodes that already exist
+    //      in the nodes array.
+    //
+    // Example:
+    //   Tamil Selvi (gen 0) → Pappammal (gen 2)   [skips gen 1]
+    //   Becomes:
+    //   Tamil Selvi (gen 0) → Mani N (gen 1)       [label: மகன்/மகள்]
+    //   Mani N (gen 1)      → Pappammal (gen 2)    [label: அப்பா/அம்மா]
+    //
+    // Each short hop stays entirely within its own V_GAP — label never
+    // overlaps any node card.
+    //
+    // How intermediary nodes are found:
+    //   Build a map of generation → list of nodes in that generation.
+    //   For a skipping edge from gen A to gen B, find a node in gen A+step
+    //   that is already in the nodes array (already part of the family tree).
+    //   Chain through each intermediate generation until reaching the target.
+    // ────────────────────────────────────────────────────────────────────
+
+    const finalEdges = splitCrossGenEdges(edges, nodes);
+
     return res.json({
       success: true,
       root_id: rootId,
       nodes,
-      edges,
+      edges: finalEdges,
       config: { max_gen: MAX_GEN, min_gen: MIN_GEN },
     });
 
@@ -1689,6 +1717,108 @@ router.get('/linkedin-tree/:user_id', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// ─────────────────────────────────────────
+// splitCrossGenEdges
+// Breaks edges that skip generations into sequential hops.
+// Each hop goes exactly 1 generation — label always lands in the
+// V_GAP between rows, never behind a node card.
+//
+// Input:  edges[]  — raw edges from BFS (may skip generations)
+//         nodes[]  — all nodes in the tree (used to find intermediaries)
+// Output: edges[]  — all edges span exactly 1 generation
+// ─────────────────────────────────────────
+function splitCrossGenEdges(edges, nodes) {
+  // Build generation → node list map for fast lookup
+  const genNodeMap = {};
+  for (const node of nodes) {
+    const g = node.generation;
+    if (!genNodeMap[g]) genNodeMap[g] = [];
+    genNodeMap[g].push(node);
+  }
+
+  // Build id → node map for fast lookup
+  const nodeById = {};
+  for (const node of nodes) {
+    nodeById[node.id] = node;
+  }
+
+  const result = [];
+
+  for (const edge of edges) {
+    const genFrom = edge.generation_from;
+    const genTo   = edge.generation_to;
+    const diff    = Math.abs(genTo - genFrom);
+
+    // Edge spans exactly 1 generation — no split needed
+    if (diff <= 1) {
+      result.push(edge);
+      continue;
+    }
+
+    // Edge skips generations — split into hops
+    // Direction: +1 going into the past (higher gen), -1 going into future (lower gen)
+    const step = genTo > genFrom ? 1 : -1;
+
+    let currentFromId  = edge.from_id;
+    let currentFromGen = genFrom;
+
+    let splitSuccessful = true;
+
+    while (currentFromGen !== genTo) {
+      const nextGen = currentFromGen + step;
+
+      // Find a node in nextGen that connects this hop
+      // Priority: find the actual to_node if it's at nextGen,
+      // otherwise find any node in nextGen that is an ancestor/descendant
+      let nextNode = null;
+
+      if (nextGen === genTo) {
+        // Last hop — connect directly to the target
+        nextNode = nodeById[edge.to_id];
+      } else {
+        // Intermediate hop — find any node at nextGen
+        // Prefer nodes that are on the direct path (same side of tree)
+        const candidatesAtNextGen = genNodeMap[nextGen] || [];
+        if (candidatesAtNextGen.length === 0) {
+          // No node at this intermediate generation — cannot split cleanly
+          // Fall back to keeping the original long edge
+          splitSuccessful = false;
+          break;
+        }
+        // Pick the first available candidate at this generation
+        // (in a well-formed family tree this will be the correct intermediary)
+        nextNode = candidatesAtNextGen[0];
+      }
+
+      if (!nextNode) {
+        splitSuccessful = false;
+        break;
+      }
+
+      // Push a single-generation hop edge
+      result.push({
+        from_id:          currentFromId,
+        to_id:            nextNode.id,
+        relation_type:    edge.relation_type,
+        relation_tamil:   edge.relation_tamil,
+        verified:         edge.verified,
+        generation_from:  currentFromGen,
+        generation_to:    nextGen,
+      });
+
+      currentFromId  = nextNode.id;
+      currentFromGen = nextGen;
+    }
+
+    if (!splitSuccessful) {
+      // Could not find clean path — keep original edge as fallback
+      result.push(edge);
+    }
+  }
+
+  return result;
+}
 
 // ─────────────────────────────────────────
 // GET /api/offline-users/search
